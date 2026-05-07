@@ -17,17 +17,17 @@ def get_base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
+from core.llm_helper import generate_content_with_waterfall
+
 
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+# _get_api_key removed in favor of llm_helper
 
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
-    import google.generativeai as genai
+
 
     if speak:
         speak("Writing custom code for this task, sir.")
@@ -46,10 +46,8 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
+    try:
+        sys_inst = (
             "You are an expert Python developer. "
             "Write clean, complete, working Python code. "
             "Use standard library + common packages. "
@@ -61,11 +59,9 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
             f"  Documents = r'{documents}'\n"
             f"  Home      = r'{home}'\n"
         )
-    )
-
-    try:
-        response = model.generate_content(
-            f"Write Python code to accomplish this task:\n\n{description}"
+        response = generate_content_with_waterfall(
+            f"Write Python code to accomplish this task:\n\n{description}",
+            system_instruction=sys_inst
         )
         code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
@@ -128,11 +124,8 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
     try:
-        response = model.generate_content(
+        response = generate_content_with_waterfall(
             f"What language is this text written in? "
             f"Reply with ONLY the language name in English (e.g. Turkish, English, French).\n\n"
             f"Text: {text[:200]}"
@@ -146,10 +139,6 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model = genai.GenerativeModel("gemini-2.5-flash")
-
         target_lang = _detect_language(goal)
         print(f"[Executor] 🌐 Translating to: {target_lang}")
 
@@ -163,7 +152,7 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
             f"- Output ONLY the translated text, nothing else\n\n"
             f"Text to translate:\n{content[:4000]}"
         )
-        response = model.generate_content(prompt)
+        response = generate_content_with_waterfall(prompt)
         translated = response.text.strip()
         print(f"[Executor] ✅ Translation done ({target_lang})")
         return translated
@@ -332,6 +321,21 @@ class AgentExecutor:
 
                         else: 
                             fix_suggestion = recovery.get("fix_suggestion", "")
+                            # ── Vision Recovery: enrich context before fix ──
+                            try:
+                                from core.vision_recovery import attempt_visual_recovery
+                                vis = attempt_visual_recovery(
+                                    tool_name=tool,
+                                    parameters=params,
+                                    error=error_msg,
+                                )
+                                vis_diag = vis.get("diagnosis", "")
+                                if vis_diag:
+                                    fix_suggestion = f"{fix_suggestion}. Visual context: {vis_diag}"
+                                    print(f"[Executor] 👁️ Vision: {vis_diag[:100]}")
+                            except Exception as vis_err:
+                                print(f"[Executor] ⚠️ Vision recovery skipped: {vis_err}")
+
                             if fix_suggestion and tool != "generated_code":
                                 try:
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
@@ -377,9 +381,6 @@ class AgentExecutor:
     def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
         fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=_get_api_key())
-            model     = genai.GenerativeModel(model_name="gemini-2.5-flash-lite")
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
@@ -387,7 +388,7 @@ class AgentExecutor:
                 "Write a single natural sentence summarizing what was accomplished. "
                 "Address the user as 'sir'. Be direct and positive."
             )
-            response = model.generate_content(prompt)
+            response = generate_content_with_waterfall(prompt)
             summary  = response.text.strip()
             if speak: speak(summary)
             return summary

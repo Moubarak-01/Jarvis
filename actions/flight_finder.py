@@ -13,14 +13,18 @@ def _get_base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
+from memory.config_manager import get_gemini_key
+
 
 BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+# API_CONFIG_PATH removed in favor of .env
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise RuntimeError("gemini_api_key not found in environment or config.")
+    return key
 
 _MONTH_MAP: dict[str, int] = {
 
@@ -62,13 +66,13 @@ def _parse_date(raw: str) -> str:
             return val.strftime("%Y-%m-%d")
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model    = genai.GenerativeModel("gemini-2.5-flash-lite")
-        response = model.generate_content(
-            f"Today is {today.strftime('%Y-%m-%d')}. "
-            f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
-            f"Return ONLY the date string, nothing else."
+        from core.llm_helper import generate_content_with_waterfall
+        response = generate_content_with_waterfall(
+            (
+                f"Today is {today.strftime('%Y-%m-%d')}. "
+                f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
+                f"Return ONLY the date string, nothing else."
+            )
         )
         result = response.text.strip()
         if re.match(r"\d{4}-\d{2}-\d{2}", result):
@@ -116,7 +120,6 @@ def _build_google_flights_url(
     return (
         f"{base}"
         f"?q={trip}"
-        f"&tfs=CBwQAhoeEgoyMDI1LTAzLTE1agcIARIDSVNUcgcIARIDTEhS"   
         f"&curr=USD"
         f"&cabin={cabin_code}"
         f"&adults={passengers}"
@@ -152,18 +155,11 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as gtypes
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
-            "You are a flight data extraction expert. "
-            "Extract flight information from raw webpage text. "
-            "Return ONLY valid JSON — no markdown, no explanation."
-        ),
-    )
-
+    client = genai.Client(api_key=_get_api_key())
+    
     prompt = (
         f"Extract flight options from {origin} to {destination} on {date} "
         f"from this Google Flights page text:\n\n{raw_text[:12000]}\n\n"
@@ -174,9 +170,22 @@ def _parse_flights_with_gemini(
     )
 
     try:
-        response = model.generate_content(prompt)
-        text     = re.sub(r"```(?:json)?", "", response.text).strip().rstrip("`").strip()
-        flights  = json.loads(text)
+        from core.llm_helper import generate_content_with_waterfall
+        response = generate_content_with_waterfall(
+            prompt,
+            system_instruction=(
+                "You are a flight data extraction expert. "
+                "Extract flight information from raw webpage text. "
+                "Return ONLY a valid JSON array. If no flights are found, return exactly []."
+            )
+        )
+        text = response.text.strip()
+        # Clean up common LLM artifacts
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+        if not text:
+            return []
+            
+        flights = json.loads(text)
         return flights if isinstance(flights, list) else []
     except Exception as e:
         print(f"[FlightFinder] ⚠️ Gemini parse failed: {e}")

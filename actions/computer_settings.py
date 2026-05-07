@@ -6,6 +6,8 @@ import time
 import subprocess
 import platform
 from pathlib import Path
+from memory.config_manager import get_gemini_key
+from core.startup_manager import setup_startup, remove_startup
 
 try:
     import pyautogui
@@ -30,9 +32,10 @@ def _get_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 def _get_api_key() -> str:
-    path = _get_base_dir() / "config" / "api_keys.json"
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise RuntimeError("gemini_api_key not found in environment or config.")
+    return key
 
 def _get_macos_wifi_interface() -> str:
     try:
@@ -562,6 +565,8 @@ ACTION_MAP: dict[str, callable] = {
     "toggle_wifi":         toggle_wifi,
     "restart":             restart_computer,
     "shutdown":            shutdown_computer,
+    "setup_startup":       setup_startup,
+    "remove_startup":      remove_startup,
 }
 
 _DANGEROUS_ACTIONS = {"restart", "shutdown"}
@@ -570,9 +575,8 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 
 def _detect_action(description: str) -> dict:
 
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    from google import genai
+    client = genai.Client(api_key=_get_api_key())
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"
@@ -596,7 +600,8 @@ Rules:
 - Return ONLY the JSON, no explanation, no markdown."""
 
     try:
-        resp = model.generate_content(prompt)
+        from core.llm_helper import generate_content_with_waterfall
+        resp = generate_content_with_waterfall(prompt)
         text = re.sub(r"```(?:json)?", "", resp.text).strip().rstrip("`").strip()
         return json.loads(text)
     except Exception as e:
@@ -682,8 +687,8 @@ def computer_settings(
         return f"Unknown action: '{raw_action}'."
 
     try:
-        func()
-        return f"Done: {action}."
+        result = func()
+        return result if result else f"Done: {action}."
     except Exception as e:
         print(f"[Settings] Action failed ({action}): {e}")
         return f"Action failed ({action}): {e}"

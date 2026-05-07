@@ -13,6 +13,7 @@ from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
+from memory.config_manager import get_gemini_key
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
@@ -31,7 +32,15 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
+from actions.persona_control   import persona_control
+from actions.gmail_handler     import gmail_processor
+from actions.outlook_handler   import outlook_processor
+from actions.github_handler    import github_processor
 
+
+class ReconnectRequested(Exception):
+    """Custom exception to trigger a session reset."""
+    pass
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -49,8 +58,10 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise ValueError("❌ Gemini API Key not found! Please add it to your .env file or the UI.")
+    return key
 
 
 def _load_system_prompt() -> str:
@@ -171,9 +182,11 @@ TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {
                 "angle": {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
-                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"}
+                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"},
+                "monitor": {"type": "STRING", "description": "active | 0 (all) | 1 | 2 | 3 (default: active)"},
+                "preview": {"type": "STRING", "description": "on | off (controls the live camera preview window in the UI)"}
             },
-            "required": ["text"]
+            "required": []
         }
     },
     {
@@ -289,6 +302,17 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "persona_control",
+        "description": "Changes J.A.R.V.I.S.'s voice persona (Charon, Aoede, Puck, or Kore).",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "voice_name": {"type": "STRING", "description": "The name of the voice: Charon | Aoede | Puck | Kore"}
+            },
+            "required": ["voice_name"]
+        }
+    },
+    {
         "name": "agent_task",
         "description": (
             "Executes complex multi-step tasks requiring multiple different tools. "
@@ -306,7 +330,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+        "description": "Direct computer control. Use 'screen_click' to click elements by name. DO NOT use 'smart_click' or 'smart_move' — they do not exist.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -478,19 +502,69 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "gmail_processor",
+        "description": (
+            "Visible automation for Gmail. Use this for searching emails or drafting new ones. "
+            "Action 'draft' will prepare the email in a visible window and wait for user review. "
+            "Action 'send' will explicitly click the send button."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | draft | send"},
+                "to": {"type": "STRING", "description": "Recipient email address"},
+                "subject": {"type": "STRING", "description": "Email subject"},
+                "body": {"type": "STRING", "description": "Email body content"},
+                "query": {"type": "STRING", "description": "Search query"},
+                "account_alias": {"type": "STRING", "description": "Which account to use (default: 'default')"}
+            }
+        }
+    },
+    {
+        "name": "outlook_processor",
+        "description": "Visible automation for Outlook. Supports 'search', 'draft', and 'send' actions.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | draft | send"},
+                "to": {"type": "STRING"},
+                "subject": {"type": "STRING"},
+                "body": {"type": "STRING"},
+                "query": {"type": "STRING"}
+            }
+        }
+    },
+    {
+        "name": "github_processor",
+        "description": "Visible automation for GitHub. Use for 'search' and 'draft_issue'.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | draft_issue"},
+                "query": {"type": "STRING"},
+                "repo": {"type": "STRING", "description": "Owner/Repo (e.g. 'google/playwright')"},
+                "title": {"type": "STRING"},
+                "body": {"type": "STRING"}
+            }
+        }
+    },
 ]
 
 class JarvisLive:
 
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        self.ui._live_instance = self
         self.session        = None
         self.audio_in_queue = None
         self.out_queue      = None
         self._loop          = None
         self._is_speaking   = False
         self._speaking_lock = threading.Lock()
+        self._reconnect_requested = False
         self.ui.on_text_command = self._on_text_command
+        self.ui.on_speak        = self.speak
         self._turn_done_event: asyncio.Event | None = None
 
     def _on_text_command(self, text: str):
@@ -511,6 +585,10 @@ class JarvisLive:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
+
+    def request_reconnect(self):
+        self._reconnect_requested = True
+        print("[JARVIS] 🔄 Reconnect requested...")
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -558,7 +636,7 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=memory.get("settings", {}).get("active_voice", {}).get("value", "Charon")
                     )
                 )
             ),
@@ -673,6 +751,22 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "persona_control":
+                r = await loop.run_in_executor(None, lambda: persona_control(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "gmail_processor":
+                r = await loop.run_in_executor(None, lambda: gmail_processor(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "outlook_processor":
+                r = await loop.run_in_executor(None, lambda: outlook_processor(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "github_processor":
+                r = await loop.run_in_executor(None, lambda: github_processor(parameters=args, player=self.ui))
+                result = r or "Done."
+
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Goodbye, sir.")
@@ -686,9 +780,60 @@ class JarvisLive:
                 result = f"Unknown tool: {name}"
 
         except Exception as e:
-            result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
-            self.speak_error(name, e)
+            # ── Adaptive Vision Recovery ──────────────────────────
+            # Capture screen and analyze what actually happened
+            try:
+                from core.vision_recovery import attempt_visual_recovery
+                recovery = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: attempt_visual_recovery(
+                        tool_name=name,
+                        parameters=args,
+                        error=str(e),
+                        player=self.ui,
+                    ),
+                )
+                diagnosis = recovery.get("diagnosis", str(e))
+                actual    = recovery.get("actual_state", "unknown")
+                corrected = recovery.get("corrected_params")
+                # Give the LLM rich context so it can self-correct
+                parts = [f"Tool '{name}' failed: {diagnosis}"]
+                parts.append(f"Screen state: {actual}")
+                if recovery.get("should_retry") and corrected:
+                    parts.append(f"Suggested correction: {json.dumps(corrected, default=str)[:300]}")
+                    parts.append("You may retry this tool with the corrected parameters.")
+                result = " | ".join(parts)
+                self.speak_error(name, diagnosis)
+            except Exception:
+                result = f"Tool '{name}' failed: {e}"
+                self.speak_error(name, e)
+
+        # ── Visual Verification for 'Soft Failures' ──────────────
+        # If tool returns a string indicating failure, trigger vision recovery
+        fail_keywords = ["couldn't find", "could not find", "error", "failed", "no results"]
+        is_soft_fail = isinstance(result, str) and any(k in result.lower() for k in fail_keywords)
+        
+        if is_soft_fail and name in ("flight_finder", "browser_control", "web_search"):
+            print(f"[JARVIS] 👁️ Result looks suspicious ('{result[:30]}...'), checking screen...")
+            try:
+                from core.vision_recovery import attempt_visual_recovery
+                recovery = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: attempt_visual_recovery(
+                        tool_name=name,
+                        parameters=args,
+                        error=str(result),
+                        player=self.ui,
+                    ),
+                )
+                if recovery.get("screenshot_taken"):
+                    diagnosis = recovery.get("diagnosis", "")
+                    actual    = recovery.get("actual_state", "")
+                    if diagnosis:
+                        result = f"{result} | Visual Analysis: {diagnosis} (Screen: {actual})"
+            except Exception as ve:
+                print(f"[JARVIS] ⚠️ Vision verification failed: {ve}")
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
@@ -708,13 +853,20 @@ class JarvisLive:
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
+        def _safe_enqueue(queue, item):
+            try:
+                queue.put_nowait(item)
+            except asyncio.QueueFull:
+                pass  # drop chunk silently — mic produces faster than network consumes
+
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
+                    _safe_enqueue,
+                    self.out_queue,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
 
@@ -855,13 +1007,21 @@ class JarvisLive:
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
 
+                    while not self._reconnect_requested:
+                        await asyncio.sleep(0.5)
+                    
+                    self._reconnect_requested = False
+                    raise ReconnectRequested()
+
+            except ReconnectRequested:
+                pass
             except Exception as e:
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
             self.set_speaking(False)
             self.ui.set_state("THINKING")
-            print("[JARVIS] 🔄 Reconnecting in 3s...")
-            await asyncio.sleep(3)
+            # If it was a forced reconnect, we don't need a long delay
+            await asyncio.sleep(0.5)
 
 def main():
     ui = JarvisUI("face.png")
@@ -878,4 +1038,13 @@ def main():
     ui.root.mainloop()
 
 if __name__ == "__main__":
+    # ── Single-instance guard ────────────────────────────────────
+    # Uses a Windows named mutex so only ONE Jarvis can run at a time.
+    import ctypes
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "Global\\JarvisMark39SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:        # ERROR_ALREADY_EXISTS
+        print("[JARVIS] ⚠️ Another instance is already running. Exiting.")
+        ctypes.windll.kernel32.CloseHandle(_mutex)
+        sys.exit(0)
+    # ─────────────────────────────────────────────────────────────
     main()

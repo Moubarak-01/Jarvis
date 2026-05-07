@@ -8,6 +8,7 @@ import sys
 import time
 import random
 from pathlib import Path
+from memory.config_manager import get_gemini_key, get_os_system
 
 try:
     import pyautogui
@@ -30,21 +31,12 @@ def _base_dir() -> Path:
 
 
 _BASE         = _base_dir()
-_CONFIG_PATH  = _BASE / "config" / "api_keys.json"
 _MEMORY_PATH  = _BASE / "memory" / "long_term.json"
-
-def _load_config() -> dict:
-    try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
-
+    return get_os_system()
 
 def _get_api_key() -> str:
-    return _load_config().get("gemini_api_key", "")
+    return get_gemini_key() or ""
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),
@@ -216,13 +208,21 @@ def _clipboard_get() -> str:
     return "(copied — pyperclip unavailable for read)"
 
 
-def _clipboard_paste(text: str) -> str:
+def _clipboard_paste(text: str = "") -> str:
+    """
+    Pastes text via clipboard. 
+    If text is provided, it overwrites the clipboard.
+    If text is empty, it just performs a ctrl+v (preserving current clipboard).
+    """
     if _PYPERCLIP:
-        pyperclip.copy(text)
-        time.sleep(0.1)
+        if text:
+            pyperclip.copy(text)
+            time.sleep(0.1) # Wait for OS clipboard to update
+        
         _require_pyautogui()
+        time.sleep(0.2) # Delay for focus stability
         pyautogui.hotkey("ctrl", "v")
-        return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
+        return f"Pasted: {text[:60] if text else '(system clipboard)'}{'…' if len(text) > 60 else ''}"
     return "pyperclip not available"
 
 
@@ -321,12 +321,14 @@ def _screen_find(description: str) -> tuple[int, int] | None:
             f"If the element is not visible, reply: NOT_FOUND"
         )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=[
-                gtypes.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                prompt,
-            ],
+        from core.llm_helper import generate_content_with_waterfall
+        import PIL.Image
+        
+        img_pil = PIL.Image.open(io.BytesIO(image_bytes))
+        
+        response = generate_content_with_waterfall(
+            [prompt, img_pil],
+            is_vision=True
         )
 
         text = (response.text or "").strip()

@@ -2,6 +2,7 @@
 import json
 import sys
 from pathlib import Path
+from memory.config_manager import get_gemini_key
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -10,22 +11,21 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+# API_CONFIG_PATH removed in favor of .env
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise RuntimeError("gemini_api_key not found in environment or config.")
+    return key
 
 
 def _gemini_search(query: str) -> str:
-    from google import genai
-
-    client   = genai.Client(api_key=_get_api_key())
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=query,
-        config={"tools": [{"google_search": {}}]},
+    from core.llm_helper import generate_content_with_waterfall
+    response = generate_content_with_waterfall(
+        query,
+        config={"tools": [{"google_search": {}}]}
     )
 
     text = ""

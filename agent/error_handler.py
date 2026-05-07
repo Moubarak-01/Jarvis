@@ -10,6 +10,8 @@ def get_base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
+from core.llm_helper import generate_content_with_waterfall
+
 
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
@@ -49,9 +51,7 @@ Return ONLY valid JSON:
 """
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+# _get_api_key removed in favor of llm_helper
 
 
 def analyze_error(
@@ -78,7 +78,7 @@ def analyze_error(
             "user_message": str
         }
     """
-    import google.generativeai as genai
+
 
     if attempt >= max_attempts:
         print(f"[ErrorHandler] ⚠️ Max attempts reached for step {step.get('step')} — forcing replan")
@@ -90,13 +90,8 @@ def analyze_error(
             "user_message":  "Trying a different approach, sir."
         }
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-lite",
-        system_instruction=ERROR_ANALYST_PROMPT
-    )
-
-    prompt = f"""Failed step:
+    try:
+        prompt = f"""Failed step:
 Tool: {step.get('tool')}
 Description: {step.get('description')}
 Parameters: {json.dumps(step.get('parameters', {}), indent=2)}
@@ -107,8 +102,10 @@ Error:
 
 Attempt number: {attempt}"""
 
-    try:
-        response = model.generate_content(prompt)
+        response = generate_content_with_waterfall(
+            prompt,
+            system_instruction=ERROR_ANALYST_PROMPT
+        )
         text     = response.text.strip()
         text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
 
@@ -148,11 +145,6 @@ def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
 
     Returns a modified step dict.
     """
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
-
     prompt = f"""A task step failed. Generate a replacement step.
 
 Original step:
@@ -167,7 +159,7 @@ Write a Python script that accomplishes the same goal differently.
 Return ONLY the Python code, no explanation."""
 
     try:
-        response = model.generate_content(prompt)
+        response = generate_content_with_waterfall(prompt)
         code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 

@@ -35,6 +35,7 @@ except ImportError:
 
 from google import genai
 from google.genai import types as gtypes
+from memory.config_manager import get_gemini_key, get_os_system, load_config, save_config_key
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -42,35 +43,15 @@ def _base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-_BASE        = _base_dir()
-_CONFIG_PATH = _BASE / "config" / "api_keys.json"
-
-
-def _load_config() -> dict:
-    try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_config_key(key: str, value) -> None:
-    try:
-        cfg = _load_config()
-        cfg[key] = value
-        _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
-    except Exception as e:
-        print(f"[Vision] ⚠️  Could not save config key '{key}': {e}")
-
-
 def _get_api_key() -> str:
-    key = _load_config().get("gemini_api_key", "")
+    key = get_gemini_key()
     if not key:
-        raise RuntimeError("gemini_api_key not found in config.")
+        raise RuntimeError("gemini_api_key not found in environment or config.")
     return key
 
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    return get_os_system()
 
 _LIVE_MODEL         = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 _CHANNELS           = 1
@@ -105,18 +86,47 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
         print(f"[Vision] ⚠️  Image compress failed: {e}")
         return img_bytes, f"image/{source_format.lower()}"
 
-def _capture_screen() -> tuple[bytes, str]:
-
-    if not _MSS:
-        raise RuntimeError("mss is not installed. Run: pip install mss")
-
+def _capture_screen(monitor_index: str | int = "active") -> tuple[bytes, str]:
+    import pyautogui
     with mss.mss() as sct:
-        monitors = sct.monitors          # [0] = all combined, [1..n] = real screens
-        target   = monitors[1] if len(monitors) > 1 else monitors[0]
-        shot     = sct.grab(target)
-        png      = mss.tools.to_png(shot.rgb, shot.size)
+        monitors = sct.monitors # [0]=all, [1..n]=individual
+        
+        if monitor_index == "active":
+            # Detect which monitor the cursor is on
+            x, y = pyautogui.position()
+            target = monitors[0] # Default
+            for i, m in enumerate(monitors[1:], 1):
+                if m["left"] <= x < m["left"] + m["width"] and \
+                   m["top"]  <= y < m["top"]  + m["height"]:
+                    target = m
+                    print(f"[Vision] 🖱️ Cursor on Monitor {i} ({m['width']}x{m['height']})")
+                    break
+        elif isinstance(monitor_index, int) and 0 <= monitor_index < len(monitors):
+            target = monitors[monitor_index]
+            print(f"[Vision] 🖥️ Manual Monitor Selection: {monitor_index}")
+        else:
+            target = monitors[0]
+            print(f"[Vision] 🖥️ Capturing all displays.")
+
+        shot = sct.grab(target)
+        png  = mss.tools.to_png(shot.rgb, shot.size)
 
     return _compress(png, "PNG")
+
+def _compress(png_bytes: bytes, format_ext: str) -> tuple[bytes, str]:
+    # If PNG is small enough (< 2MB), keep it for maximum quality
+    if len(png_bytes) < 2000000:
+        return png_bytes, "image/png"
+    
+    # Otherwise, convert to high-quality JPEG
+    img = PIL.Image.open(io.BytesIO(png_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+
+    output = io.BytesIO()
+    # 95 quality is nearly indistinguishable from original
+    img.save(output, format="JPEG", quality=95, optimize=True)
+    return output.getvalue(), "image/jpeg"
 
 
 def _cv2_backend() -> int:
@@ -155,23 +165,37 @@ def _detect_camera_index() -> int:
     for idx in range(6):
         if _probe_camera(idx, backend):
             print(f"[Vision] ✅ Camera found at index {idx}")
-            _save_config_key("camera_index", idx)
+            save_config_key("camera_index", idx)
             return idx
         print(f"[Vision] ⚠️  Camera index {idx}: no usable frame")
 
     print("[Vision] ⚠️  No camera found — defaulting to index 0")
-    _save_config_key("camera_index", 0)
+    save_config_key("camera_index", 0)
     return 0
 
 
 def _get_camera_index() -> int:
-    cfg = _load_config()
+    cfg = load_config()
     if "camera_index" in cfg:
         return int(cfg["camera_index"])
     return _detect_camera_index()
 
 
-def _capture_camera() -> tuple[bytes, str]:
+def _capture_camera(player=None) -> tuple[bytes, str]:
+    if player and hasattr(player, 'get_camera_frame'):
+        frame = player.get_camera_frame()
+        if frame is not None:
+            # We already have a frame from the UI preview!
+            if _PIL:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = PIL.Image.fromarray(rgb)
+                img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), PIL.Image.BILINEAR)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=_JPEG_Q)
+                return buf.getvalue(), "image/jpeg"
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_Q])
+            return buf.tobytes(), "image/jpeg"
+
     if not _CV2:
         raise RuntimeError("OpenCV (cv2) is not installed. Run: pip install opencv-python")
 
@@ -324,7 +348,14 @@ class _VisionSession:
         try:
             async for response in self._session.receive():
                 if response.data:
-                    await self._audio_in.put(response.data)
+                    try:
+                        self._audio_in.put_nowait(response.data)
+                    except asyncio.QueueFull:
+                        # Clear old audio if jammed
+                        while not self._audio_in.empty():
+                            try: self._audio_in.get_nowait()
+                            except asyncio.QueueEmpty: break
+                        self._audio_in.put_nowait(response.data)
 
                 sc = response.server_content
                 if not sc:
@@ -391,6 +422,15 @@ def screen_process(
     params    = parameters or {}
     user_text = (params.get("text") or params.get("user_text") or "").strip()
     angle     = params.get("angle", "screen").lower().strip()
+    mon_idx   = params.get("monitor", "active")
+    preview   = params.get("preview", "").lower().strip()
+
+    if preview == "on" and player:
+        player.set_camera_preview(True)
+        return "Camera preview activated, sir. You can now see yourself in the side panel."
+    elif preview == "off" and player:
+        player.set_camera_preview(False)
+        return "Camera preview deactivated, sir."
 
     if not user_text:
         print("[Vision] ⚠️  No question provided — aborting")
@@ -406,17 +446,43 @@ def screen_process(
 
     try:
         if angle == "camera":
-            image_bytes, mime_type = _capture_camera()
+            image_bytes, mime_type = _capture_camera(player=player)
             print(f"[Vision] 📷 Camera: {len(image_bytes):,} bytes")
         else:
-            image_bytes, mime_type = _capture_screen()
-            print(f"[Vision] 🖥️  Screen: {len(image_bytes):,} bytes")
+            image_bytes, mime_type = _capture_screen(mon_idx)
+            print(f"[Vision] 🖥️  Screen (mode={mon_idx}): {len(image_bytes):,} bytes")
     except Exception as e:
         print(f"[Vision] ❌ Capture error: {e}")
         return False
 
-    _session.analyze(image_bytes, mime_type, user_text)
-    return True
+    try:
+        from core.llm_helper import generate_content_with_waterfall
+        import PIL.Image
+
+        # Use the waterfall for better "seeing" capability
+        img = PIL.Image.open(io.BytesIO(image_bytes))
+        prompt = [user_text, img]
+        
+        response = generate_content_with_waterfall(
+            prompt, 
+            system_instruction=_SYSTEM_PROMPT,
+            is_vision=True
+        )
+        
+        result_text = response.text
+        print(f"[Vision] ✅ Waterfall Result: {result_text[:100]}...")
+        
+        if player:
+            player.speak(result_text)
+        else:
+            print(f"[Vision] 💬 {result_text}")
+            
+        return True
+    except Exception as e:
+        print(f"[Vision] ❌ Waterfall analysis failed: {e}")
+        # Fallback to live session if possible
+        _session.analyze(image_bytes, mime_type, user_text)
+        return True
 
 
 def warmup_session(player=None) -> None:

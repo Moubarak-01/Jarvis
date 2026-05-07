@@ -25,6 +25,7 @@ except ImportError:
     _TRANSCRIPT_OK = False
 
 from config import get_os, is_windows, is_mac, is_linux
+from core.llm_helper import generate_content_with_waterfall
 
 
 def _get_base_dir() -> Path:
@@ -34,7 +35,7 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+# API_CONFIG_PATH removed in favor of .env
 
 HEADERS = {
     "User-Agent": (
@@ -49,8 +50,10 @@ _YT_VIDEO_FILTER = "EgIQAQ%3D%3D"
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise RuntimeError("gemini_api_key not found in environment or config.")
+    return key
 
 
 def _open_url(url: str) -> None:
@@ -158,26 +161,24 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
+    try:
+        sys_inst = (
             "You are JARVIS, an AI assistant. "
             "Summarize YouTube video transcripts clearly and concisely. "
             "Structure: 1-sentence overview, then 3-5 key points. "
             "Be direct. Address the user as 'sir'. "
             "Match the language of the transcript."
         )
-    )
-
-    max_chars = 80000
-    truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
-    response  = model.generate_content(
-        f"Please summarize this YouTube video transcript:\n\n{truncated}"
-    )
-    return response.text.strip()
+        max_chars = 30000
+        truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
+        
+        response = generate_content_with_waterfall(
+            f"Please summarize this YouTube video transcript:\n\n{truncated}",
+            system_instruction=sys_inst
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"Summarization failed: {e}"
 
 
 def _save_summary(content: str, video_url: str) -> str:

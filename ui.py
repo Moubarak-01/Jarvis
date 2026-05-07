@@ -8,6 +8,7 @@ import random
 import subprocess
 import sys
 import threading
+from threading import Lock
 import time
 from pathlib import Path
 
@@ -24,9 +25,12 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
-    QVBoxLayout, QWidget, QProgressBar,
+    QMainWindow, QMenu, QPushButton, QScrollArea, QSizePolicy,
+    QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+from PyQt6.QtGui import QAction, QIcon
+import cv2
+from PyQt6.QtGui import QImage, QPixmap
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -35,7 +39,7 @@ def _base_dir() -> Path:
 
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
-API_FILE   = CONFIG_DIR / "api_keys.json"
+# API_FILE removed in favor of .env
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
@@ -554,6 +558,66 @@ class MetricBar(QWidget):
         p.setPen(QPen(bar_col if self._text != "--" else qcol(C.TEXT_DIM), 1))
         p.drawText(QRectF(0, 4, W - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._text)
 
+class CameraWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._w = _LEFT_W - 16
+        self._h = int(self._w * 0.75)
+        self.setFixedSize(self._w, self._h)
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.label = QLabel("CAMERA OFF")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self.label.setStyleSheet(f"""
+            color: {C.TEXT_DIM}; 
+            background: {C.PANEL}; 
+            border: 1px solid {C.BORDER}; 
+            border-radius: 4px;
+        """)
+        self.layout.addWidget(self.label)
+        
+        self.cap = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
+        self.latest_frame = None
+        self._frame_lock = Lock()
+
+    def start(self):
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(0)
+        self.timer.start(50) # 20 FPS
+        self.label.setText("INITIALIZING...")
+
+    def stop(self):
+        self.timer.stop()
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        self.label.setText("CAMERA OFF")
+        self.label.setPixmap(QPixmap())
+
+    def update_frame(self):
+        if self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                frame = cv2.flip(frame, 1)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                bytes_per_line = ch * w
+                q_img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                pix = QPixmap.fromImage(q_img).scaled(
+                    self._w, self._h, 
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.label.setPixmap(pix)
+                
+                with self._frame_lock:
+                    self.latest_frame = frame
+
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
 
@@ -810,11 +874,19 @@ class _DropCanvas(QWidget):
         p.drawText(QRectF(0, cy + 12, W, 16), Qt.AlignmentFlag.AlignCenter, "Release to load")
 
     def _paint_file(self, p, W, H):
-        path = Path(self._z._current_file)
-        cat  = _file_category(path)
-        icon, icon_col = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
-        size_str = _fmt_size(path.stat().st_size)
-        ext_str  = path.suffix.upper().lstrip(".") or "FILE"
+        try:
+            path = Path(self._z._current_file)
+            if not path.exists():
+                self._paint_idle(p, W, H, False)
+                return
+            
+            cat  = _file_category(path)
+            icon, icon_col = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
+            size_str = _fmt_size(path.stat().st_size)
+            ext_str  = path.suffix.upper().lstrip(".") or "FILE"
+        except Exception:
+            self._paint_idle(p, W, H, False)
+            return
 
         block_x, block_w = 10, 60
         p.setFont(QFont("Segoe UI Emoji", 22) if _OS == "Windows" else QFont("Arial", 22))
@@ -1054,11 +1126,119 @@ class MainWindow(QMainWindow):
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
 
+        # ── System Tray ──────────────────────────────────────
+        self._quit_from_tray = False
+        self._tray = QSystemTrayIcon(self)
+        self._tray.setToolTip("J.A.R.V.I.S — MARK XXXIX")
+        self._tray_icons = self._create_tray_icons()
+        self._tray.setIcon(self._tray_icons["listening"])
+        self._tray.activated.connect(self._on_tray_activated)
+
+        tray_menu = QMenu()
+        tray_menu.setStyleSheet(f"""
+            QMenu {{ background: {C.PANEL}; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 4px; }}
+            QMenu::item {{ padding: 6px 20px; }}
+            QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
+        """)
+        act_show = QAction("Show / Hide", self)
+        act_show.triggered.connect(self._tray_toggle_visible)
+        tray_menu.addAction(act_show)
+
+        act_mute = QAction("Toggle Mute", self)
+        act_mute.triggered.connect(self._toggle_mute)
+        tray_menu.addAction(act_mute)
+
+        tray_menu.addSeparator()
+        act_quit = QAction("Quit JARVIS", self)
+        act_quit.triggered.connect(self._tray_quit)
+        tray_menu.addAction(act_quit)
+
+        self._tray.setContextMenu(tray_menu)
+        self._tray.show()
+
     def _toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
         else:
             self.showFullScreen()
+
+    # ── System Tray Methods ──────────────────────────────
+    def _create_tray_icons(self) -> dict:
+        """Generate colored tray icons in-memory for each state."""
+        icons = {}
+        state_colors = {
+            "listening": C.PRI,      # cyan
+            "thinking":  C.ACC2,     # yellow/orange
+            "speaking":  C.ACC,      # orange
+            "muted":     C.RED,      # red
+        }
+        for key, color_hex in state_colors.items():
+            px = QPixmap(64, 64)
+            px.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(px)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QBrush(QColor(color_hex)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(4, 4, 56, 56)
+            # Inner ring
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 80), 2))
+            painter.drawEllipse(10, 10, 44, 44)
+            painter.end()
+            icons[key] = QIcon(px)
+        return icons
+
+    def _update_tray_icon(self, state: str):
+        """Update tray icon color based on current state."""
+        if self._muted:
+            key = "muted"
+        elif state.upper() in ("THINKING", "PROCESSING"):
+            key = "thinking"
+        elif state.upper() == "SPEAKING":
+            key = "speaking"
+        else:
+            key = "listening"
+        self._tray.setIcon(self._tray_icons.get(key, self._tray_icons["listening"]))
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_toggle_visible()
+
+    def _tray_toggle_visible(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.showNormal()
+            self.activateWindow()
+            self.raise_()
+
+    def _tray_quit(self):
+        self._quit_from_tray = True
+        self._tray.hide()
+        QApplication.instance().quit()
+
+    def closeEvent(self, event):
+        """Minimize to tray instead of quitting."""
+        if not self._quit_from_tray:
+            event.ignore()
+            self.hide()
+            self._tray.showMessage(
+                "JARVIS",
+                "Running in background. Double-click the tray icon to restore.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000,
+            )
+        else:
+            self._tray.hide()
+            event.accept()
+
+    def notify(self, title: str, message: str, duration: int = 3000):
+        """Show a Windows toast notification from the system tray."""
+        self._tray.showMessage(
+            title, message,
+            QSystemTrayIcon.MessageIcon.Information,
+            duration,
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1194,6 +1374,12 @@ class MainWindow(QMainWindow):
         for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
                     self._bar_gpu, self._bar_tmp]:
             lay.addWidget(bar)
+
+        lay.addSpacing(4)
+
+        self.camera_preview = CameraWidget()
+        self.camera_preview.hide()
+        lay.addWidget(self.camera_preview)
 
         lay.addSpacing(4)
 
@@ -1355,8 +1541,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _on_file_selected(self, path: str):
-        self._current_file = path
-        p    = Path(path)
+        self._current_file = str(Path(path).absolute())
+        p    = Path(self._current_file)
         cat  = _file_category(p)
         icon, _ = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
         size = _fmt_size(p.stat().st_size)
@@ -1412,14 +1598,15 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        # Update tray icon color to match state
+        if hasattr(self, '_tray'):
+            self._update_tray_icon(state)
 
     def _check_config(self) -> bool:
-        if not API_FILE.exists(): return False
-        try:
-            d = json.loads(API_FILE.read_text(encoding="utf-8"))
-            return bool(d.get("gemini_api_key")) and bool(d.get("os_system"))
-        except Exception:
-            return False
+        # Check environment variables
+        key = os.getenv("GEMINI_API_KEY")
+        # os_system is optional here as it has a default in config/__init__.py
+        return bool(key and len(key) > 15)
 
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
@@ -1435,11 +1622,14 @@ class MainWindow(QMainWindow):
         self._overlay = ov
 
     def _on_setup_done(self, key: str, os_name: str):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+        # We'll just update the current environment for this session
+        os.environ["GEMINI_API_KEY"] = key
+        os.environ["OS_SYSTEM"]      = os_name
+        
+        # Also update the .env file
+        env_path = BASE_DIR / ".env"
+        env_content = f"GEMINI_API_KEY={key}\nOS_SYSTEM={os_name}\n"
+        env_path.write_text(env_content, encoding="utf-8")
         self._ready = True
         if self._overlay:
             self._overlay.hide()
@@ -1456,13 +1646,26 @@ class _RootShim:
         pass
 
 
-class JarvisUI:
+class JarvisUI(QObject):
+    _camera_toggle_sig = pyqtSignal(bool)
+
     def __init__(self, face_path: str, size=None):
+        super().__init__()
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         self._win = MainWindow(face_path)
+        self._camera_toggle_sig.connect(self._handle_camera_toggle, Qt.ConnectionType.QueuedConnection)
         self._win.show()
         self.root = _RootShim(self._app)
+
+        # ── Clipboard Monitor ────────────────────────────────
+        try:
+            from core.clipboard_monitor import ClipboardMonitor
+            self._clipboard_monitor = ClipboardMonitor(parent=self._win)
+            self._clipboard_monitor.suggestion.connect(self._on_clipboard_suggestion)
+        except Exception as e:
+            print(f"[UI] ⚠️ Clipboard monitor failed to start: {e}")
+            self._clipboard_monitor = None
 
     @property
     def muted(self) -> bool:
@@ -1485,6 +1688,22 @@ class JarvisUI:
     def on_text_command(self, cb):
         self._win.on_text_command = cb
 
+    @property
+    def on_speak(self):
+        return getattr(self, "_on_speak_cb", None)
+
+    @on_speak.setter
+    def on_speak(self, cb):
+        self._on_speak_cb = cb
+
+    def speak(self, text: str):
+        cb = getattr(self, "_on_speak_cb", None)
+        if cb:
+            cb(text)
+        else:
+            print(f"[UI] 💬 {text}")
+            self.write_log(f"JARVIS: {text}")
+
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
 
@@ -1501,3 +1720,47 @@ class JarvisUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
+
+    def set_camera_preview(self, active: bool):
+        """Toggles the camera preview widget and captures frames."""
+        self._camera_toggle_sig.emit(active)
+
+    def request_reconnect(self):
+        """Requests a reconnection from the live session (e.g. for voice change)."""
+        if hasattr(self, '_live_instance'):
+            self._live_instance.request_reconnect()
+
+    def _handle_camera_toggle(self, active: bool):
+        if active:
+            self._win.camera_preview.show()
+            self._win.camera_preview.start()
+        else:
+            self._win.camera_preview.stop()
+            self._win.camera_preview.hide()
+
+    def get_camera_frame(self):
+        """Returns the latest frame from the camera preview if active."""
+        if hasattr(self._win, 'camera_preview') and self._win.camera_preview.isVisible():
+            with self._win.camera_preview._frame_lock:
+                return self._win.camera_preview.latest_frame
+        return None
+
+    def notify(self, title: str, message: str, duration: int = 3000):
+        """Send a Windows toast notification via the system tray."""
+        self._win.notify(title, message, duration)
+
+    def _on_clipboard_suggestion(self, content_type: str, message: str, raw_text: str):
+        """Handle clipboard monitor suggestions."""
+        self.write_log(f"SYS: {message}")
+        # Speak the suggestion for voice confirmation
+        cb = getattr(self, "_on_speak_cb", None)
+        if cb:
+            cb(f"Sir, {message}")
+        # Also show a tray notification if window is hidden
+        if not self._win.isVisible():
+            self.notify("JARVIS — Clipboard", message, 4000)
+
+    def set_clipboard_monitor(self, enabled: bool):
+        """Enable or disable the clipboard monitor."""
+        if self._clipboard_monitor:
+            self._clipboard_monitor.enabled = enabled

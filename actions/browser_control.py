@@ -13,6 +13,7 @@ from typing import Optional
 
 from playwright.async_api import (
     async_playwright,
+    Browser,
     BrowserContext,
     Page,
     Playwright,
@@ -66,10 +67,10 @@ def _real_profile_dir(browser: str) -> str:
 
     if _OS == "Windows":
         m = {
-            "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data"],
-            "edge":     [Path(local) / "Microsoft"        / "Edge"            / "User Data"],
-            "brave":    [Path(local) / "BraveSoftware"    / "Brave-Browser"   / "User Data"],
-            "vivaldi":  [Path(local) / "Vivaldi"          / "User Data"],
+            "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data" / "Default"],
+            "edge":     [Path(local) / "Microsoft"        / "Edge"            / "User Data" / "Default"],
+            "brave":    [Path(local) / "BraveSoftware"    / "Brave-Browser"   / "User Data" / "Default"],
+            "vivaldi":  [Path(local) / "Vivaldi"          / "User Data" / "Default"],
             "opera":    [Path(roam)  / "Opera Software"   / "Opera Stable",
                          Path(local) / "Opera Software"   / "Opera Stable"],
             "operagx":  [Path(roam)  / "Opera Software"   / "Opera GX Stable",
@@ -80,10 +81,10 @@ def _real_profile_dir(browser: str) -> str:
     elif _OS == "Darwin":
         lib = home / "Library" / "Application Support"
         m = {
-            "chrome":   [lib / "Google"             / "Chrome"],
-            "edge":     [lib / "Microsoft Edge"],
-            "brave":    [lib / "BraveSoftware"       / "Brave-Browser"],
-            "vivaldi":  [lib / "Vivaldi"],
+            "chrome":   [lib / "Google"             / "Chrome" / "Default"],
+            "edge":     [lib / "Microsoft Edge" / "Default"],
+            "brave":    [lib / "BraveSoftware"       / "Brave-Browser" / "Default"],
+            "vivaldi":  [lib / "Vivaldi" / "Default"],
             "opera":    [lib / "com.operasoftware.Opera"],
             "operagx":  [lib / "com.operasoftware.OperaGX"],
         }
@@ -92,10 +93,10 @@ def _real_profile_dir(browser: str) -> str:
     elif _OS == "Linux":
         cfg = home / ".config"
         m = {
-            "chrome":   [cfg / "google-chrome", cfg / "chromium"],
-            "edge":     [cfg / "microsoft-edge"],
-            "brave":    [cfg / "BraveSoftware" / "Brave-Browser"],
-            "vivaldi":  [cfg / "vivaldi"],
+            "chrome":   [cfg / "google-chrome" / "Default", cfg / "chromium" / "Default"],
+            "edge":     [cfg / "microsoft-edge" / "Default"],
+            "brave":    [cfg / "BraveSoftware" / "Brave-Browser" / "Default"],
+            "vivaldi":  [cfg / "vivaldi" / "Default"],
             "opera":    [cfg / "opera"],
             "operagx":  [cfg / "opera-gx"],
         }
@@ -353,14 +354,15 @@ class _BrowserSession:
     def __init__(self, browser_name: str):
         self.browser_name = browser_name
         self._spec        = _resolve_browser(browser_name)
-
         self._loop:    asyncio.AbstractEventLoop | None = None
         self._thread:  threading.Thread | None          = None
         self._ready    = threading.Event()
 
-        self._pw:      Playwright     | None = None
+        self._browser: Optional[Browser] = None
         self._context: BrowserContext | None = None
         self._page:    Page           | None = None
+        self._pw:      Playwright     | None = None
+        self._use_fallback_profile: bool = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -464,7 +466,12 @@ class _BrowserSession:
             print(f"[Browser] ✅ Safari launched")
             return
 
-        profile = _real_profile_dir(self.browser_name)
+        # --- Profile Selection ---
+        if self._use_fallback_profile:
+            print(f"[Browser] 🛡️ Using JARVIS safety profile (Real profile is locked).")
+            profile = str(Path.home() / ".jarvis_profiles" / f"{self.browser_name}_jarvis")
+        else:
+            profile = _real_profile_dir(self.browser_name)
 
         kwargs = {
             "headless":    False,
@@ -477,6 +484,7 @@ class _BrowserSession:
                 "--no-first-run",
                 "--disable-default-apps",
                 "--no-default-browser-check",
+                "--profile-directory=Default",
             ],
         }
 
@@ -494,31 +502,65 @@ class _BrowserSession:
         try:
             self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
             await asyncio.sleep(0.5) 
-            self._page = await self._context.new_page()
+            
+            # --- CRITICAL CHECK: Verify if the browser actually stayed alive ---
+            if not self._context.pages:
+                self._page = await self._context.new_page()
+            else:
+                self._page = self._context.pages[0]
+
             print(f"[Browser] ✅ Launched [{label}] profile={profile}")
             return
         except Exception as e:
-            print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
-
-        jarvis_profile = str(Path.home() / ".jarvis_profiles" / self.browser_name)
-        Path(jarvis_profile).mkdir(parents=True, exist_ok=True)
-        print(f"[Browser] Retrying with JARVIS profile: {jarvis_profile}")
-
-        try:
-            self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
-            await asyncio.sleep(0.5)
-            self._page = await self._context.new_page()
-            print(f"[Browser] ✅ Launched [{label}] with JARVIS profile")
-        except Exception as e2:
-            raise RuntimeError(f"Could not launch {self.browser_name}: {e2}") from e2
+            if not self._use_fallback_profile:
+                print(f"[Browser] ⚠️ Real profile failed or crashed for {label}: {e}")
+                print(f"[Browser] 🛡️ Blacklisting real profile and switching to safety profile for this session.")
+                self._use_fallback_profile = True
+                # Clean up and try again
+                if self._context:
+                    try: await self._context.close()
+                    except: pass
+                self._context = None
+                await self._launch()
+                return
+            else:
+                print(f"[Browser] ❌ Safety profile also failed: {e}")
+                raise e
 
 
     async def _get_page(self) -> Page:
         await self._launch()
+        
+        # If context is dead, we must perform a hard reset and relaunch
+        context_is_dead = False
+        try:
+            if self._context:
+                # Simple check to see if context is still responsive
+                _ = self._context.pages[0].url if self._context.pages else "about:blank"
+        except Exception:
+            context_is_dead = True
+
+        if context_is_dead:
+            print("[Browser] ⚠️ Detected dead browser context. Performing hard reset...")
+            try:
+                if self._context: await self._context.close()
+            except: pass
+            self._context = None
+            self._page = None
+            await self._launch()
+
         # If somehow page got closed, open a fresh one
         if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-            await asyncio.sleep(0.2)
+            try:
+                self._page = await self._context.new_page()
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                print(f"[Browser] ❌ Failed to open new page: {e}. Attempting one last recovery...")
+                self._context = None
+                self._page = None
+                await self._launch()
+                self._page = await self._context.new_page()
+                
         return self._page
 
     async def go_to(self, url: str) -> str:

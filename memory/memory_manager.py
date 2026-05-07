@@ -25,6 +25,7 @@ def _empty_memory() -> dict:
         "relationships": {},
         "wishes":        {},
         "notes":         {},
+        "settings":      {},
     }
 
 def load_memory() -> dict:
@@ -194,7 +195,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     return result + "\n"
 
 def remember(key: str, value: str, category: str = "notes") -> str:
-    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes", "settings"}
     if category not in valid:
         category = "notes"
     update_memory({category: {key: {"value": value}}})

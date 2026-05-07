@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from memory.config_manager import get_gemini_key
 
 
 def get_base_dir():
@@ -13,21 +14,22 @@ def get_base_dir():
 
 
 BASE_DIR         = get_base_dir()
-API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
+# API_CONFIG_PATH removed
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
+MODEL_PLANNER    = "gemma-4-31b-it"
+MODEL_WRITER     = "gemma-4-31b-it"
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    key = get_gemini_key()
+    if not key:
+        raise RuntimeError("gemini_api_key not found in environment or config.")
+    return key
 
 
-def _get_model(model_name: str):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model_name)
+def _get_client():
+    from google import genai
+    return genai.Client(api_key=_get_api_key())
 
 
 def _strip_fences(text: str) -> str:
@@ -97,7 +99,7 @@ class RateLimitError(Exception):
 
 
 def _plan_project(description: str, language: str) -> dict:
-    model = _get_model(MODEL_PLANNER)
+
 
     prompt = f"""You are a senior software architect. Create a minimal, complete file plan for this project.
 
@@ -135,7 +137,8 @@ Critical rules:
 JSON:"""
 
     try:
-        response = model.generate_content(prompt)
+        from core.llm_helper import generate_content_with_waterfall
+        response = generate_content_with_waterfall(prompt)
         raw = _strip_fences(response.text)
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -153,7 +156,7 @@ def _write_file(
     project_dir: Path,
     already_written: dict[str, str],
 ) -> str:
-    model = _get_model(MODEL_WRITER)
+
 
     file_path = file_info["path"]
     file_desc = file_info.get("description", "")
@@ -214,7 +217,8 @@ General rules:
 Code for {file_path}:"""
 
     try:
-        response = model.generate_content(prompt)
+        from core.llm_helper import generate_content_with_waterfall
+        response = generate_content_with_waterfall(prompt)
         code = _strip_fences(response.text)
 
         full_path = project_dir / file_path
@@ -350,7 +354,7 @@ def _fix_files(
     entry_point: str,
 ) -> dict[str, str]:
 
-    model = _get_model(MODEL_PLANNER)
+    from core.llm_helper import generate_content_with_waterfall
 
     error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
     error_type = _classify_error(error_output)
@@ -412,7 +416,7 @@ Rules:
 Fixed code for {fix_path}:"""
 
         try:
-            response = model.generate_content(prompt)
+            response = generate_content_with_waterfall(prompt)
             fixed = _strip_fences(response.text)
 
             full_path = project_dir / fix_path
