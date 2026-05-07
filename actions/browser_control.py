@@ -446,7 +446,7 @@ class _BrowserSession:
                 Path(jarvis).mkdir(parents=True, exist_ok=True)
                 self._context = await engine_obj.launch_persistent_context(jarvis, **kwargs)
 
-            await asyncio.sleep(0.5)  
+            await asyncio.sleep(0.2)  
             self._page = await self._context.new_page()
             print(f"[Browser] ✅ Firefox launched")
             return
@@ -461,7 +461,7 @@ class _BrowserSession:
                 "no_viewport": True,
             }
             self._context = await engine_obj.launch_persistent_context(safari_profile, **kwargs)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             self._page = await self._context.new_page()
             print(f"[Browser] ✅ Safari launched")
             return
@@ -500,8 +500,26 @@ class _BrowserSession:
         )
 
         try:
+            # 1. Instant Profile Lock Detection (Zero Timeout)
+            if _OS == "Windows":
+                # The lock file is usually in the parent of the 'Default' profile folder
+                p_path = Path(profile)
+                lock_file = p_path.parent / "SingletonLock" if p_path.name == "Default" else p_path / "SingletonLock"
+                
+                if lock_file.exists():
+                    try:
+                        # Try to rename the file to itself. This fails instantly if another process (Chrome) has it open.
+                        # This is much more reliable on Windows than os.open.
+                        lock_file.rename(lock_file)
+                    except (PermissionError, OSError):
+                        print(f"[Browser] 🛡️ Detected lock on '{self.browser_name}' profile instantly.")
+                        if not self._use_fallback_profile:
+                            self._use_fallback_profile = True
+                            await self._launch()
+                            return
+
             self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
-            await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.1) 
             
             # --- CRITICAL CHECK: Verify if the browser actually stayed alive ---
             if not self._context.pages:
@@ -601,19 +619,46 @@ class _BrowserSession:
             "bing":       "https://www.bing.com/search?q=",
             "duckduckgo": "https://duckduckgo.com/?q=",
             "yandex":     "https://yandex.com/search/?text=",
+            "youtube":    "https://www.youtube.com/results?search_query=",
+            "wikipedia":  "https://en.wikipedia.org/wiki/Special:Search?search=",
+            "github":     "https://github.com/search?q=",
         }
+        
+        page = await self._get_page()
+        current_url = page.url.lower()
+        
+        # Context-aware search: If on a specific site, use its internal search
+        if "youtube.com" in current_url and engine == "google":
+            engine = "youtube"
+        elif "wikipedia.org" in current_url and engine == "google":
+            engine = "wikipedia"
+        elif "github.com" in current_url and engine == "google":
+            engine = "github"
+
         base = _engines.get(engine.lower(), _engines["google"])
         return await self.go_to(base + query.replace(" ", "+"))
 
     async def click(self, selector: str = None, text: str = None) -> str:
         page = await self._get_page()
         try:
+            loc = None
             if text:
-                await page.get_by_text(text, exact=False).first.click(timeout=8_000)
-                return f"Clicked text: '{text}'"
-            if selector:
-                await page.click(selector, timeout=8_000)
-                return f"Clicked selector: {selector}"
+                loc = page.get_by_text(text, exact=False).first
+            elif selector:
+                loc = page.locator(selector).first
+
+            if loc:
+                # Get bounding box for human-like movement
+                box = await loc.bounding_box()
+                if box:
+                    # Target center of element
+                    tx = box["x"] + box["width"] / 2
+                    ty = box["y"] + box["height"] / 2
+                    await self._move_mouse_bezier(tx, ty)
+                    await loc.click(timeout=8_000, force=True)
+                else:
+                    await loc.click(timeout=8_000)
+                return f"Clicked: '{text or selector}'"
             return "No selector or text provided."
         except PlaywrightTimeout:
             return "Element not found (timeout)."
@@ -675,29 +720,145 @@ class _BrowserSession:
         return "Form filled: " + ", ".join(results)
 
     async def smart_click(self, description: str) -> str:
+        """Grounded Smart Click: Uses AI to find exact element in AXTree/DOM before clicking."""
         page = await self._get_page()
-        for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab"):
-            try:
-                loc = page.get_by_role(role, name=description)
-                if await loc.count() > 0:
-                    await loc.first.click(timeout=5_000)
-                    return f"Clicked ({role}): '{description}'"
-            except Exception:
-                pass
-        for attempt in (
-            lambda: page.get_by_text(description, exact=False).first.click(timeout=5_000),
-            lambda: page.get_by_placeholder(description, exact=False).first.click(timeout=5_000),
-            lambda: page.locator(
-                f'[alt*="{description}" i],[title*="{description}" i],'
-                f'[aria-label*="{description}" i]'
-            ).first.click(timeout=5_000),
-        ):
-            try:
-                await attempt()
-                return f"Clicked: '{description}'"
-            except Exception:
-                pass
+        
+        try:
+            # 1. Gather semantic data
+            ax_tree = await self.get_ax_tree()
+            comp_dom = await self.get_compressed_dom()
+            
+            # 2. Use fast LLM grounding (Local import to avoid circular dependency)
+            from core.llm_helper import generate_content_with_waterfall
+            prompt = (
+                f"Accessibility Tree:\n{ax_tree[:1500]}\n\n"
+                f"Compressed DOM:\n{comp_dom[:1500]}\n\n"
+                f"User wants to click: '{description}'\n"
+                "INSTRUCTION: Find the best matching element. Return ONLY the exact text, aria-label, or id. "
+                "CRITICAL: Do NOT explain your reasoning. Do NOT return multiple lines. If you see reasoning in your head, IGNORE IT. "
+                "Output ONLY the string. Example: 'Submit' or 'login-btn'."
+            )
+            response = generate_content_with_waterfall(prompt)
+            # Sanitize: Take only the first line and remove punctuation that breaks CSS
+            precise_target = response.text.strip().split("\n")[0].strip().strip("'").strip('"')
+            
+            # If the LLM returned a whole paragraph anyway, it's garbage. Truncate it.
+            if len(precise_target) > 50:
+                precise_target = description
+
+            # 3. Attempt precise click
+            for loc in [
+                page.get_by_role("button", name=precise_target).first,
+                page.get_by_role("link", name=precise_target).first,
+                page.get_by_text(precise_target, exact=True).first,
+            ]:
+                try:
+                    if loc and await loc.count() > 0:
+                        box = await loc.bounding_box()
+                        if box:
+                            await self._move_mouse_bezier(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
+                        await loc.click(timeout=4_000, force=True)
+                        return f"Grounded click: '{precise_target}'"
+                except Exception:
+                    continue
+
+            # ID Search (Separate to avoid BADSTRING css errors)
+            if precise_target and len(precise_target) < 30 and " " not in precise_target:
+                try:
+                    loc = page.locator(f"#{precise_target}").first
+                    if await loc.count() > 0:
+                        await loc.click(timeout=3_000)
+                        return f"Grounded ID click: '{precise_target}'"
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[Browser] Grounding failed: {e}")
+
+        # 4. Fallback to Deep Search (JavaScript injection)
+        deep_search_js = """
+        (label) => {
+            const findDeep = (root) => {
+                const selectors = [`[aria-label*="${label}" i]`, `[title*="${label}" i]`, 'button', 'a'];
+                for (const selector of selectors) {
+                    const elements = root.querySelectorAll(selector);
+                    for (const el of elements) {
+                        if (el.innerText?.toLowerCase().includes(label.toLowerCase()) || 
+                            el.getAttribute('aria-label')?.toLowerCase().includes(label.toLowerCase())) return el;
+                    }
+                }
+                const walkers = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+                let node;
+                while (node = walkers.nextNode()) {
+                    if (node.shadowRoot) {
+                        const found = findDeep(node.shadowRoot);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            const el = findDeep(document.body);
+            if (el) {
+                const rect = el.getBoundingClientRect();
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }
+            return null;
+        }
+        """
+        try:
+            coords = await page.evaluate(deep_search_js, description)
+            if coords:
+                await self._move_mouse_bezier(coords["x"], coords["y"])
+                await page.mouse.click(coords["x"], coords["y"])
+                return f"Deep clicked: '{description}'"
+        except Exception:
+            pass
         return f"Could not find element: '{description}'"
+
+    async def get_compressed_dom(self) -> str:
+        """Returns a highly compressed list of interactive elements for fast reasoning."""
+        page = await self._get_page()
+        compress_js = """
+        () => {
+            const interactive = [];
+            const walk = (root) => {
+                if (!root) return;
+                const elements = root.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"]');
+                elements.forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        interactive.push({
+                            tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
+                            text: (el.innerText || el.value || "").slice(0, 30).trim(),
+                            aria: el.getAttribute('aria-label') || "",
+                            id: el.id || "",
+                            type: el.type || ""
+                        });
+                    }
+                });
+                
+                const all = root.querySelectorAll('*');
+                all.forEach(el => {
+                    if (el && el.shadowRoot) walk(el.shadowRoot);
+                });
+            };
+            walk(document.body);
+            return interactive.slice(0, 50); 
+        }
+        """
+        try:
+            elements = await page.evaluate(compress_js)
+            lines = []
+            for el in elements:
+                line = f"<{el['tag']}"
+                if el['id']: line += f" id='{el['id']}'"
+                if el['text']: line += f" text='{el['text']}'"
+                if el['aria']: line += f" aria='{el['aria']}'"
+                line += ">"
+                lines.append(line)
+            return "\n".join(lines)
+        except Exception as e:
+            return f"DOM compression error: {e}"
 
     async def smart_type(self, description: str, text: str) -> str:
         page = await self._get_page()
@@ -747,6 +908,54 @@ class _BrowserSession:
             return f"Screenshot saved: {save_path}"
         except Exception as e:
             return f"Screenshot error: {e}"
+
+    async def get_ax_tree(self) -> str:
+        """Returns a simplified version of the Accessibility Tree for semantic reasoning."""
+        page = await self._get_page()
+        try:
+            if not hasattr(page, "accessibility"):
+                return "Accessibility API not supported by this browser/version."
+            snapshot = await page.accessibility.snapshot()
+            if not snapshot:
+                return "Accessibility tree unavailable."
+
+            def parse_node(node, depth=0):
+                role = node.get("role", "unknown")
+                name = node.get("name", "")
+                val  = node.get("value", "")
+                desc = f"{'  '*depth}[{role}]"
+                if name: desc += f" '{name}'"
+                if val:  desc += f" (value: {val})"
+                
+                results = [desc]
+                for child in node.get("children", []):
+                    results.append(parse_node(child, depth + 1))
+                return "\n".join(results)
+
+            return parse_node(snapshot)
+        except Exception as e:
+            return f"AXTree error: {e}"
+
+    async def _move_mouse_bezier(self, target_x: float, target_y: float):
+        """Moves the mouse using a quadratic Bezier curve to simulate human movement."""
+        import random
+        page = await self._get_page()
+        try:
+            # We assume a starting point since current mouse position isn't tracked easily
+            start_x, start_y = target_x + 200, target_y + 200
+            
+            cp_x = (start_x + target_x) / 2 + (random.random() - 0.5) * 150
+            cp_y = (start_y + target_y) / 2 + (random.random() - 0.5) * 150
+            
+            steps = 12
+            for i in range(steps + 1):
+                t = i / steps
+                x = (1-t)**2 * start_x + 2*(1-t)*t * cp_x + t**2 * target_x
+                y = (1-t)**2 * start_y + 2*(1-t)*t * cp_y + t**2 * target_y
+                await page.mouse.move(x, y)
+                await asyncio.sleep(0.005)
+        except Exception:
+            await page.mouse.move(target_x, target_y)
 
     async def back(self) -> str:
         page = await self._get_page()
@@ -897,6 +1106,10 @@ def browser_control(
             result = sess.run(sess.smart_type(params.get("description", ""), params.get("text", "")))
         elif action == "get_text":
             result = sess.run(sess.get_text())
+        elif action == "get_ax_tree":
+            result = sess.run(sess.get_ax_tree())
+        elif action == "get_compressed_dom":
+            result = sess.run(sess.get_compressed_dom())
         elif action == "get_url":
             result = sess.run(sess.get_url())
         elif action == "press":
@@ -930,6 +1143,6 @@ def browser_control(
 
 def _log(player, text: str):
     short = str(text)[:80]
-    print(f"[Browser] {short}")
+    print(f'[Browser] {short}')
     if player:
-        player.write_log(f"[browser] {short[:60]}")
+        player.write_log(f'[browser] {short[:60]}')

@@ -1752,11 +1752,7 @@ class JarvisUI(QObject):
     def _on_clipboard_suggestion(self, content_type: str, message: str, raw_text: str):
         """Handle clipboard monitor suggestions."""
         self.write_log(f"SYS: {message}")
-        # Speak the suggestion for voice confirmation
-        cb = getattr(self, "_on_speak_cb", None)
-        if cb:
-            cb(f"Sir, {message}")
-        # Also show a tray notification if window is hidden
+        # Tray notification for visual feedback without speaking
         if not self._win.isVisible():
             self.notify("JARVIS — Clipboard", message, 4000)
 

@@ -45,7 +45,7 @@ game_updater
   shutdown_when_done: boolean (optional)
 
 browser_control
-  action: "go_to" | "search" | "click" | "type" | "scroll" | "get_text" | "press" | "close" (required)
+  action: "go_to" | "search" | "click" | "type" | "scroll" | "get_text" | "get_ax_tree" | "get_compressed_dom" | "press" | "close" (required)
   url: string (for go_to)
   query: string (for search)
   text: string (for click/type)

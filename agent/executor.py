@@ -238,6 +238,7 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
 class AgentExecutor:
 
     MAX_REPLAN_ATTEMPTS = 2
+    MAX_REACTIVE_STEPS  = 15
 
     def execute(
         self,
@@ -246,7 +247,129 @@ class AgentExecutor:
         cancel_flag: threading.Event | None = None,
     ) -> str:
         print(f"\n[Executor] 🎯 Goal: {goal}")
+        
+        # Decide if we use Reactive Mode (Browser/Desktop tasks)
+        reactive_keywords = (
+            "browser", "chrome", "edge", "website", "click", "type", "screen",
+            "youtube", "google", "search", "open", "go to", "find", "check", 
+            "look", "scroll", "press", "button", "link", "page"
+        )
+        is_reactive = any(kw in goal.lower() for kw in reactive_keywords)
+        
+        if is_reactive:
+            print("[Executor] 🔄 Entering Reactive Mode (Look-Plan-Act)")
+            return self._execute_reactive(goal, speak, cancel_flag)
+        
+        return self._execute_sequential(goal, speak, cancel_flag)
 
+    def _execute_reactive(self, goal: str, speak: Callable | None, cancel_flag: threading.Event | None) -> str:
+        completed_steps = []
+        step_results    = {}
+        
+        for i in range(1, self.MAX_REACTIVE_STEPS + 1):
+            if cancel_flag and cancel_flag.is_set():
+                return "Task cancelled."
+
+            # 1. LOOK: Get AXTree, Compressed DOM, and Screenshot in parallel
+            from actions.browser_control import browser_control
+            from actions.screen_processor import _capture_screen
+            from concurrent.futures import ThreadPoolExecutor
+
+            print(f"\n[Executor] 👁️ Step {i}: Observing state (Parallel)...")
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                f_ax   = pool.submit(browser_control, {"action": "get_ax_tree"})
+                f_dom  = pool.submit(browser_control, {"action": "get_compressed_dom"})
+                f_shot = pool.submit(_capture_screen)
+                
+                ax_tree   = f_ax.result()
+                comp_dom  = f_dom.result()
+                shot_data = f_shot.result()
+                shot, mime = shot_data if shot_data else (None, None)
+            
+            # 2. PLAN: Ask LLM for the SINGLE next step
+            state_context = (
+                f"Goal: {goal}\n\n"
+                f"Accessibility Tree:\n{str(ax_tree)[:2000]}\n\n"
+                f"Compressed DOM (Interactive Elements):\n{str(comp_dom)[:2000]}\n\n"
+                "Previous Steps:\n"
+            )
+            for s in completed_steps:
+                state_context += f"- {s.get('description')}: {s.get('result')}\n"
+            
+            prompt = (
+                f"{state_context}\n\n"
+                "Based on the goal and current screen state, what is the ONE next tool action to take?\n"
+                "Return ONLY valid JSON in this exact format:\n"
+                "{\n"
+                '  "tool": "name_of_tool",\n'
+                '  "parameters": {"param1": "value1"},\n'
+                '  "description": "Short explanation of this step"\n'
+                "}\n\n"
+                "Available Tools: browser_control, web_search, computer_control, screen_process.\n"
+                "If the goal is fully reached, return: {'status': 'complete', 'summary': '...'}"
+            )
+            
+            try:
+                from agent.planner import PLANNER_PROMPT
+                import PIL.Image
+                import io
+                
+                img = PIL.Image.open(io.BytesIO(shot))
+                response = generate_content_with_waterfall(
+                    [prompt, img], 
+                    system_instruction=PLANNER_PROMPT,
+                    is_vision=True
+                )
+                
+                text = response.text.strip()
+                # Enhanced JSON cleaning: Find the first { and last }
+                json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(0)
+                
+                decision = json.loads(text)
+                
+                if decision.get("status") == "complete":
+                    return decision.get("summary", "Goal achieved.")
+                
+                tool   = decision.get("tool")
+                if not tool:
+                    print("[Executor] ⚠️ AI returned JSON without a 'tool' key. Retrying...")
+                    continue
+
+                params = decision.get("parameters", {})
+                desc   = decision.get("description", "Executing next step")
+                
+                # Clean up params that might have hallucinated formatting
+                if isinstance(params, str):
+                    try:
+                        params = json.loads(params.replace("'", '"'))
+                    except:
+                        pass
+                
+                print(f"[Executor] ▶️ Reactive Action: [{tool}] {desc}")
+                
+                # 3. ACT: Execute the step
+                result = _call_tool(tool, params, speak)
+                
+                # 4. RECORD: Save for next loop
+                decision["result"] = result
+                completed_steps.append(decision)
+                step_results[i] = result
+                
+            except Exception as e:
+                print(f"[Executor] ❌ Reactive step failed: {e}")
+                # Fallback to a quick sequential plan if reactive loop gets stuck
+                return self._execute_sequential(goal, speak, cancel_flag)
+
+        return "Reached max reactive steps."
+
+    def _execute_sequential(
+        self,
+        goal:        str,
+        speak:       Callable | None        = None,
+        cancel_flag: threading.Event | None = None,
+    ) -> str:
         replan_attempts = 0
         completed_steps = []
         step_results    = {} 
@@ -254,11 +377,8 @@ class AgentExecutor:
 
         while True:
             steps = plan.get("steps", [])
-
             if not steps:
-                msg = "I couldn't create a valid plan for this task, sir."
-                if speak: speak(msg)
-                return msg
+                return "I couldn't create a valid plan, sir."
 
             success      = True
             failed_step  = None
@@ -266,7 +386,6 @@ class AgentExecutor:
 
             for step in steps:
                 if cancel_flag and cancel_flag.is_set():
-                    if speak: speak("Task cancelled, sir.")
                     return "Task cancelled."
 
                 step_num = step.get("step", "?")
@@ -275,105 +394,40 @@ class AgentExecutor:
                 params   = step.get("parameters", {})
 
                 params = _inject_context(params, tool, step_results, goal=goal)
-
                 print(f"\n[Executor] ▶️ Step {step_num}: [{tool}] {desc}")
 
                 attempt = 1
                 step_ok = False
 
                 while attempt <= 3:
-                    if cancel_flag and cancel_flag.is_set():
-                        break
                     try:
                         result = _call_tool(tool, params, speak)
                         step_results[step_num] = result 
                         completed_steps.append(step)
-                        print(f"[Executor] ✅ Step {step_num} done: {str(result)[:100]}")
                         step_ok = True
                         break
-
                     except Exception as e:
                         error_msg = str(e)
-                        print(f"[Executor] ❌ Step {step_num} attempt {attempt} failed: {error_msg}")
-
                         recovery = analyze_error(step, error_msg, attempt=attempt)
-                        decision = recovery["decision"]
-                        user_msg = recovery.get("user_message", "")
+                        if recovery["decision"] == ErrorDecision.RETRY:
+                            attempt += 1; time.sleep(2); continue
+                        elif recovery["decision"] == ErrorDecision.SKIP:
+                            completed_steps.append(step); step_ok = True; break
+                        elif recovery["decision"] == ErrorDecision.ABORT:
+                            return f"Task aborted: {recovery.get('reason', '')}"
+                        
+                        failed_step  = step
+                        failed_error = error_msg
+                        success      = False
+                        break
 
-                        if speak and user_msg:
-                            speak(user_msg)
-
-                        if decision == ErrorDecision.RETRY:
-                            attempt += 1
-                            import time; time.sleep(2)
-                            continue
-
-                        elif decision == ErrorDecision.SKIP:
-                            print(f"[Executor] ⏭️ Skipping step {step_num}")
-                            completed_steps.append(step)
-                            step_ok = True
-                            break
-
-                        elif decision == ErrorDecision.ABORT:
-                            msg = f"Task aborted, sir. {recovery.get('reason', '')}"
-                            if speak: speak(msg)
-                            return msg
-
-                        else: 
-                            fix_suggestion = recovery.get("fix_suggestion", "")
-                            # ── Vision Recovery: enrich context before fix ──
-                            try:
-                                from core.vision_recovery import attempt_visual_recovery
-                                vis = attempt_visual_recovery(
-                                    tool_name=tool,
-                                    parameters=params,
-                                    error=error_msg,
-                                )
-                                vis_diag = vis.get("diagnosis", "")
-                                if vis_diag:
-                                    fix_suggestion = f"{fix_suggestion}. Visual context: {vis_diag}"
-                                    print(f"[Executor] 👁️ Vision: {vis_diag[:100]}")
-                            except Exception as vis_err:
-                                print(f"[Executor] ⚠️ Vision recovery skipped: {vis_err}")
-
-                            if fix_suggestion and tool != "generated_code":
-                                try:
-                                    fixed_step = generate_fix(step, error_msg, fix_suggestion)
-                                    if speak: speak("Trying an alternative approach, sir.")
-                                    res = _call_tool(
-                                        fixed_step["tool"],
-                                        fixed_step["parameters"],
-                                        speak
-                                    )
-                                    step_results[step_num] = res
-                                    completed_steps.append(step)
-                                    step_ok = True
-                                    break
-                                except Exception as fix_err:
-                                    print(f"[Executor] ⚠️ Fix failed: {fix_err}")
-
-                            failed_step  = step
-                            failed_error = error_msg
-                            success      = False
-                            break
-
-                if not step_ok and not failed_step:
-                    failed_step  = step
-                    failed_error = "Max retries exceeded"
-                    success      = False
-
-                if not success:
-                    break
+                if not success: break
 
             if success:
                 return self._summarize(goal, completed_steps, speak)
 
             if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
-                msg = f"Task failed after {replan_attempts} replan attempts, sir."
-                if speak: speak(msg)
-                return msg
-
-            if speak: speak("Adjusting my approach, sir.")
+                return "Task failed after multiple attempts."
 
             replan_attempts += 1
             plan = replan(goal, completed_steps, failed_step, failed_error)
