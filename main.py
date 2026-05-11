@@ -3,8 +3,17 @@ import re
 import threading
 import json
 import sys
+import os
 import traceback
 from pathlib import Path
+
+# --- FIX: Resolve Qt DPI Awareness conflict and suppress warnings ---
+if sys.platform == "win32":
+    # Tell Qt to use the existing DPI awareness context instead of trying to set a new one
+    os.environ["QT_QPA_PLATFORM"] = "windows:dpiawareness=0"
+    # Suppress the specific warning log if it still appears
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
+
 
 import sounddevice as sd
 from google import genai
@@ -407,6 +416,17 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "restart_jarvis",
+        "description": (
+            "Restarts the assistant completely. "
+            "Call this when the user asks you to restart, reboot, or refresh yourself."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        }
+    },
+    {
     "name": "file_processor",
     "description": (
         "Processes any file that the user has uploaded or dropped onto the interface. "
@@ -604,7 +624,10 @@ class JarvisLive:
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
-        self.speak(f"Sir, {tool_name} encountered an error. {short}")
+        addr_pref = load_memory().get("preferences", {}).get("address_preference", {}).get("value", "sir")
+        # Use only the first part of the preference if it contains 'or' (e.g. 'sir or the honored one' -> 'sir')
+        short_addr = addr_pref.split(" or ")[0] if " or " in addr_pref else addr_pref
+        self.speak(f"{short_addr.title()}, {tool_name} encountered an error. {short}")
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -624,6 +647,12 @@ class JarvisLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+            
+            # Explicitly call out addressing preference for emphasis
+            addr_pref = memory.get("preferences", {}).get("address_preference", {}).get("value")
+            if addr_pref:
+                parts.append(f"\n[CRITICAL ADDRESSING RULE]\nYou must ONLY address the user as: {addr_pref}\n")
+        
         parts.append(sys_prompt)
 
         return types.LiveConnectConfig(
@@ -769,12 +798,25 @@ class JarvisLive:
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
+                addr_pref = load_memory().get("preferences", {}).get("address_preference", {}).get("value", "sir")
+                short_addr = addr_pref.split(" or ")[0] if " or " in addr_pref else addr_pref
+                self.speak(f"Goodbye, {short_addr}.")
                 def _shutdown():
                     import time, os
                     time.sleep(1)
                     os._exit(0)
                 threading.Thread(target=_shutdown, daemon=True).start()
+
+            elif name == "restart_jarvis":
+                self.ui.write_log("SYS: Restart requested.")
+                addr_pref = load_memory().get("preferences", {}).get("address_preference", {}).get("value", "sir")
+                self.speak(f"Restarting now, {addr_pref}.")
+                def _restart():
+                    import time, os, sys
+                    time.sleep(1.5)
+                    # Restart the process
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                threading.Thread(target=_restart, daemon=True).start()
 
             else:
                 result = f"Unknown tool: {name}"
