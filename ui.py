@@ -39,6 +39,7 @@ def _base_dir() -> Path:
 
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
+ICON_PATH  = BASE_DIR / "Jarvis_Icon-removebg-preview.png"
 # API_FILE removed in favor of .env
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
@@ -1066,6 +1067,17 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
 
+        # ── App Icon ───────────────────────────────────────────
+        if ICON_PATH.exists():
+            app_icon = QIcon(str(ICON_PATH))
+            self.setWindowIcon(app_icon)
+            QApplication.instance().setWindowIcon(app_icon)
+
+            # Windows taskbar icon fix (prevents Python logo from showing)
+            if platform.system() == "Windows":
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Jarvis.MarkXXXIX.Assistant")
+
         screen = QApplication.primaryScreen().availableGeometry()
         self.move(
             (screen.width()  - _DEFAULT_W) // 2,
@@ -1164,7 +1176,7 @@ class MainWindow(QMainWindow):
 
     # ── System Tray Methods ──────────────────────────────
     def _create_tray_icons(self) -> dict:
-        """Generate colored tray icons in-memory for each state."""
+        """Generate tray icons using the custom Jarvis icon with a colored status dot."""
         icons = {}
         state_colors = {
             "listening": C.PRI,      # cyan
@@ -1172,19 +1184,26 @@ class MainWindow(QMainWindow):
             "speaking":  C.ACC,      # orange
             "muted":     C.RED,      # red
         }
+
+        # Load the custom icon as the base
+        base = QPixmap(str(ICON_PATH)) if ICON_PATH.exists() else QPixmap()
+        has_base = not base.isNull()
+
         for key, color_hex in state_colors.items():
-            px = QPixmap(64, 64)
-            px.fill(QColor(0, 0, 0, 0))
-            painter = QPainter(px)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QBrush(QColor(color_hex)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(4, 4, 56, 56)
-            # Inner ring
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255, 80), 2))
-            painter.drawEllipse(10, 10, 44, 44)
-            painter.end()
+            if has_base:
+                px = base.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+                # Pure icon as requested
+            else:
+                # Fallback: plain colored circle
+                px = QPixmap(64, 64)
+                px.fill(QColor(0, 0, 0, 0))
+                painter = QPainter(px)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setBrush(QBrush(QColor(color_hex)))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(4, 4, 56, 56)
+                painter.end()
             icons[key] = QIcon(px)
         return icons
 

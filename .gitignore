@@ -38,6 +38,7 @@ memory/
 
 # Assets/Captures
 *.png
+!Jarvis_Icon-removebg-preview.png
 *.jpg
 *.jpeg
 *.mp3
