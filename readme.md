@@ -1,10 +1,33 @@
-# 🤖 MARK XXXIX (39)
-### The Ultimate Cross-Platform Personal AI Assistant — By Moubarak
+<div align="center">
+  <img src="Jarvis_Icon-removebg-preview.png" alt="Jarvis Icon" width="180">
+  
+  <h1>🤖 MARK XXXIX (39)</h1>
+  <h3>The Ultimate Cross-Platform Personal AI Assistant — By Moubarak</h3>
 
-> 🤖 **Modified & Enhanced by Moubarak**
-> 📺 **Original Setup Video by FatihMakes:** [Watch on YouTube](https://youtu.be/ej1f5OE3SNQ?si=lCxDhJix9ungq1Ry)
+  <p>
+    <b>🤖 Modified & Enhanced by Moubarak</b><br>
+    <b>📺 Original Setup Video by FatihMakes:</b> <a href="https://youtu.be/ej1f5OE3SNQ?si=lCxDhJix9ungq1Ry">Watch on YouTube</a>
+  </p>
 
-A real-time voice AI that can hear, see, understand, and control your computer — now enhanced with secure account management and collaborative automation.
+  <p><i>A real-time voice AI that can hear, see, understand, and control your computer — now enhanced with secure account management and collaborative automation.</i></p>
+
+  <p align="center">
+    <img src="https://img.shields.io/badge/VERSION-1.0.0-success?style=for-the-badge" alt="Version">
+    <img src="https://img.shields.io/badge/PYTHON-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+    <img src="https://img.shields.io/badge/PYQT6-UI-41CD52?style=for-the-badge&logo=qt&logoColor=white" alt="PyQt6">
+    <img src="https://img.shields.io/badge/PLAYWRIGHT-Automation-2EAD33?style=for-the-badge&logo=playwright&logoColor=white" alt="Playwright">
+    <img src="https://img.shields.io/badge/GEMINI-Live_API-8E75B2?style=for-the-badge&logo=googlebard&logoColor=white" alt="Gemini">
+  </p>
+
+  <p align="center">
+    <a href="#-capabilities">Features</a> •
+    <a href="#-moubaraks-enhancements">Architecture</a> •
+    <a href="#-quick-start">Installation</a> •
+    <a href="#-credits--acknowledgments">Contributing</a>
+  </p>
+</div>
+
+> 💡 **Inspiration:** Mark XXXIX is inspired by the iconic JARVIS AI from the Iron Man universe, bridging the gap between sci-fi concepts and real-world desktop automation.
 
 ---
 

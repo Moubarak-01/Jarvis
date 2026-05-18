@@ -8,8 +8,8 @@ from memory.config_manager import get_gemini_key
 # --- THE UNIFIED WATERFALL ---
 # Any model in this list must support Multimodal (Vision) input.
 WATERFALL_MODELS = [
-    { "type": "gemini", "model": "gemma-4-31b-it", "name": "Gemma 4 31B" },
     { "type": "gemini", "model": "gemma-4-26b-a4b-it", "name": "Gemma 4 26B" },
+    { "type": "gemini", "model": "gemma-4-31b-it", "name": "Gemma 4 31B" },
     { "type": "gemini", "model": "gemini-3.1-flash-lite-preview", "name": "Gemini 3.1 Flash Lite" },
     { "type": "gemini", "model": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
     { "type": "gemini", "model": "gemini-2.0-flash-lite-preview-02-05", "name": "Gemini 2.0 Flash Lite" },

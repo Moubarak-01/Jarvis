@@ -72,20 +72,6 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]:
-    if not _PIL:
-        return img_bytes, f"image/{source_format.lower()}"
-
-    try:
-        img = PIL.Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), PIL.Image.BILINEAR)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=_JPEG_Q, optimize=False)
-        return buf.getvalue(), "image/jpeg"
-    except Exception as e:
-        print(f"[Vision] ⚠️  Image compress failed: {e}")
-        return img_bytes, f"image/{source_format.lower()}"
-
 def _capture_screen(monitor_index: str | int = "active") -> tuple[bytes, str]:
     import pyautogui
     with mss.mss() as sct:

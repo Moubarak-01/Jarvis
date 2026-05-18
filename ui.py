@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QAction, QIcon
 import cv2
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):

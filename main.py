@@ -661,7 +661,6 @@ class JarvisLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
-            session_resumption=types.SessionResumptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -829,10 +828,10 @@ class JarvisLive:
                 from core.vision_recovery import attempt_visual_recovery
                 recovery = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: attempt_visual_recovery(
+                    lambda err=str(e): attempt_visual_recovery(
                         tool_name=name,
                         parameters=args,
-                        error=str(e),
+                        error=err,
                         player=self.ui,
                     ),
                 )
@@ -859,7 +858,6 @@ class JarvisLive:
         if is_soft_fail and name in ("flight_finder", "browser_control", "web_search"):
             print(f"[JARVIS] 👁️ Result looks suspicious ('{result[:30]}...'), checking screen...")
             try:
-                from core.vision_recovery import attempt_visual_recovery
                 recovery = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: attempt_visual_recovery(
@@ -909,7 +907,7 @@ class JarvisLive:
                 loop.call_soon_threadsafe(
                     _safe_enqueue,
                     self.out_queue,
-                    {"data": data, "mime_type": "audio/pcm"}
+                    {"data": data, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"}
                 )
 
         try:
