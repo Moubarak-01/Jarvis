@@ -16,7 +16,7 @@ WATERFALL_MODELS = [
     { "type": "gemini", "model": "gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash Lite" },
     { "type": "gemini", "model": "gemini-3-flash-preview", "name": "Gemini 3 Flash" },
     { "type": "gemini", "model": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" },
-    { "type": "gemini", "model": "gemini-2.5-flash-native-audio-dialog", "name": "Gemini 2.5 Audio (Unlimited)" }
+    { "type": "gemini", "model": "gemini-2.5-flash-native-audio-preview-12-2025", "name": "Gemini 2.5 Audio (Unlimited)" }
 ]
 
 def generate_content_with_waterfall(

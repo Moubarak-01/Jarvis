@@ -60,7 +60,7 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+LIVE_MODEL          = "gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -343,7 +343,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | screen_double_click | screen_right_click | random_data | user_data"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -586,10 +586,12 @@ class JarvisLive:
         self.ui.on_text_command = self._on_text_command
         self.ui.on_speak        = self.speak
         self._turn_done_event: asyncio.Event | None = None
+        self.session_history    = []
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
+        self.session_history.append(f"User: {text}")
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -613,6 +615,7 @@ class JarvisLive:
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
+        self.session_history.append(f"User (typed command): {text}")
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -654,6 +657,14 @@ class JarvisLive:
                 parts.append(f"\n[CRITICAL ADDRESSING RULE]\nYou must ONLY address the user as: {addr_pref}\n")
         
         parts.append(sys_prompt)
+
+        # Inject recovered conversation history if we are reconnecting after a crash
+        if self.session_history:
+            parts.append("\n[RECENT CONVERSATION HISTORY (Recovered Context)]\n")
+            parts.append("The Live API session was reconnected. Maintain context from the previous session history below:\n")
+            history_str = "\n".join(self.session_history[-30:]) # Keep up to last 30 messages
+            parts.append(history_str)
+            parts.append("\n[END OF RECOVERED HISTORY]\n")
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -887,7 +898,7 @@ class JarvisLive:
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            await self.session.send_realtime_input(audio=msg)
 
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
@@ -958,11 +969,13 @@ class JarvisLive:
                             full_in = " ".join(in_buf).strip()
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
+                                self.session_history.append(f"User: {full_in}")
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"Jarvis: {full_out}")
+                                self.session_history.append(f"Jarvis: {full_out}")
                             out_buf = []
 
                     if response.tool_call:
@@ -1021,15 +1034,17 @@ class JarvisLive:
             api_key=_get_api_key(),
             http_options={"api_version": "v1beta"}
         )
+        current_model = LIVE_MODEL
 
         while True:
             try:
-                print("[JARVIS] 🔌 Connecting...")
+                print(f"[JARVIS] 🔌 Connecting to {current_model}...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
+                clean_model = current_model.replace("models/", "")
                 async with (
-                    client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
+                    client.aio.live.connect(model=clean_model, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session        = session
@@ -1054,10 +1069,13 @@ class JarvisLive:
                     raise ReconnectRequested()
 
             except ReconnectRequested:
-                pass
+                current_model = LIVE_MODEL
             except Exception as e:
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
+                # Since we only use one model, we just sleep and retry the same model
+                print(f"[JARVIS] ⚠️ Connection dropped. Reconnecting to {LIVE_MODEL}...")
+                await asyncio.sleep(2)
             self.set_speaking(False)
             self.ui.set_state("THINKING")
             # If it was a forced reconnect, we don't need a long delay

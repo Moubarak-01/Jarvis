@@ -12,7 +12,7 @@ from memory.config_manager import get_gemini_key, get_os_system
 
 try:
     import pyautogui
-    pyautogui.FAILSAFE = True
+    pyautogui.FAILSAFE = False
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
 except ImportError:
@@ -466,6 +466,24 @@ def computer_control(
                 time.sleep(0.2)
                 _click(x=coords[0], y=coords[1])
                 return f"Clicked '{desc}' at {coords}"
+            return f"Element not found on screen: '{desc}'"
+
+        if action == "screen_double_click":
+            desc   = params.get("description", "")
+            coords = _screen_find(desc)
+            if coords:
+                time.sleep(0.2)
+                _click(x=coords[0], y=coords[1], clicks=2)
+                return f"Double-clicked '{desc}' at {coords}"
+            return f"Element not found on screen: '{desc}'"
+
+        if action == "screen_right_click":
+            desc   = params.get("description", "")
+            coords = _screen_find(desc)
+            if coords:
+                time.sleep(0.2)
+                _click(x=coords[0], y=coords[1], button="right")
+                return f"Right-clicked '{desc}' at {coords}"
             return f"Element not found on screen: '{desc}'"
 
         if action == "wait":
