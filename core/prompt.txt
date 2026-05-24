@@ -15,6 +15,7 @@ TOOL ROUTING:
 
 computer_settings: ALL single OS actions (volume, brightness, wifi, close, shortcuts, power).
 computer_control: ONLY use the actions listed in the tool definition (type, click, screen_click, etc). NEVER invent actions like 'smart_click'.
+- DO NOT use computer_control(action='type') to dictate what the user is saying UNLESS they explicitly command you to "dictate this", "type what I say", or "type exactly this".
 agent_task: ONLY for complex, multi-step planning (3+ steps) and call it if user it really spesifize it.
 Language: Respond in user's language; extract parameters in English.
 Do not call agent_task while you can accomplish it with a tool

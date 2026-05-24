@@ -16,7 +16,7 @@ import psutil
 
 from PyQt6.QtCore import (
     QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
-    QTimer, QUrl, pyqtSignal,
+    QTimer, QUrl, pyqtSignal, QThread
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QFontDatabase,
@@ -561,6 +561,7 @@ class MetricBar(QWidget):
 
 class CameraWidget(QWidget):
     frame_ready = pyqtSignal(QImage)
+    frame_ready_rgb = pyqtSignal(object)
     double_clicked = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -593,6 +594,40 @@ class CameraWidget(QWidget):
         self.double_clicked.emit()
         super().mouseDoubleClickEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, '_drag_pos') and self._drag_pos is not None:
+            if not self.isWindow():
+                # Save original layout info before removing
+                self.original_layout = self.parentWidget().layout() if self.parentWidget() else None
+                # Make it a floating tool window when dragged out of layout
+                self.setParent(None)
+                self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+                self.show()
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # No auto-dock — only voice command can dock the preview back
+        super().mouseReleaseEvent(event)
+
+    def dock(self):
+        if self.isWindow() and hasattr(self, 'original_layout') and self.original_layout is not None:
+            self.setParent(self.original_layout.parentWidget())
+            self.setWindowFlags(Qt.WindowType.Widget)
+            # Insert before btn_virtual_control (which is usually the widget right after camera preview)
+            # Or just add to layout
+            self.original_layout.insertWidget(self.original_layout.count() - 2, self)
+            self.show()
+
     def start(self):
         if self.cap is None:
             self.cap = cv2.VideoCapture(0)
@@ -621,11 +656,26 @@ class CameraWidget(QWidget):
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
                     Qt.TransformationMode.SmoothTransformation
                 )
-                self.label.setPixmap(pix)
+                if getattr(self, 'is_tracking', False):
+                    # Do not set pixmap here if we are tracking (worker will provide annotated frame)
+                    pass
+                else:
+                    self.label.setPixmap(pix)
+
                 self.frame_ready.emit(q_img)
+                self.frame_ready_rgb.emit(rgb)
                 
                 with self._frame_lock:
                     self.latest_frame = frame
+
+    def set_annotated_frame(self, q_img: QImage):
+        if getattr(self, 'is_tracking', False):
+            pix = QPixmap.fromImage(q_img).scaled(
+                self._w, self._h, 
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.label.setPixmap(pix)
 
 class LargeCameraWidget(QWidget):
     def __init__(self, parent=None):
@@ -645,6 +695,71 @@ class LargeCameraWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation
         )
         self.label.setPixmap(pix)
+
+class HandTrackingWorker(QThread):
+    annotated_frame_ready = pyqtSignal(QImage)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.active = False
+        self._lock = Lock()
+        self.current_frame = None
+        self.running = True
+        
+        # We will import HandTracker dynamically to avoid slowing down startup if mediapipe is heavy
+        self.tracker = None
+
+    def set_active(self, state: bool):
+        self.active = state
+        if not state and self.tracker is not None:
+            # Maybe reset clicking state
+            pass
+
+    def update_frame(self, frame):
+        if not self.active:
+            return
+        with self._lock:
+            self.current_frame = frame
+
+    def run(self):
+        while self.running:
+            frame_to_process = None
+            with self._lock:
+                if self.current_frame is not None:
+                    frame_to_process = self.current_frame.copy()
+                    self.current_frame = None
+            
+            if frame_to_process is not None and self.active:
+                if self.tracker is None:
+                    try:
+                        from core.hand_tracker import HandTracker
+                        self.tracker = HandTracker()
+                    except Exception as e:
+                        print(f"[HandTracking] Error loading module: {e}")
+                        self.active = False
+                        continue
+                
+                try:
+                    res_frame = self.tracker.process_frame(frame_to_process)
+                    if res_frame is not None:
+                        h, w, ch = res_frame.shape
+                        bytes_per_line = ch * w
+                        q_img = QImage(res_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                        self.annotated_frame_ready.emit(q_img)
+                except Exception as e:
+                    pass
+            
+            time.sleep(0.01) # ~100 FPS loop checking for frames
+
+    def stop(self):
+        self.running = False
+        self.wait()
+        if self.tracker is not None:
+            try:
+                self.tracker.close()
+            except:
+                pass
+
 
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
@@ -1240,6 +1355,12 @@ class MainWindow(QMainWindow):
         # Connect camera signals
         self.camera_preview.frame_ready.connect(self.large_camera.update_frame)
         self.camera_preview.double_clicked.connect(self._toggle_to_camera)
+        
+        # Virtual Hand Control
+        self.hand_worker = HandTrackingWorker(self)
+        self.hand_worker.annotated_frame_ready.connect(self.camera_preview.set_annotated_frame)
+        self.hand_worker.start()
+        self.camera_preview.frame_ready_rgb.connect(self.hand_worker.update_frame)
 
         root.addLayout(body, stretch=1)
         root.addWidget(self._build_footer())
@@ -1534,6 +1655,23 @@ class MainWindow(QMainWindow):
         if not (self.camera_preview.cap and self.camera_preview.cap.isOpened()):
             self.toggle_view_btn.hide()
 
+    def toggle_virtual_control(self, state=None):
+        if state is None:
+            # Called from button click
+            state = self.btn_virtual_control.isChecked()
+        else:
+            # Called from tool
+            self.btn_virtual_control.setChecked(state)
+
+        if state:
+            self.btn_virtual_control.setText("VIRTUAL CONTROL: ON")
+            self.camera_preview.is_tracking = True
+            self.hand_worker.set_active(True)
+        else:
+            self.btn_virtual_control.setText("VIRTUAL CONTROL: OFF")
+            self.camera_preview.is_tracking = False
+            self.hand_worker.set_active(False)
+
     def _toggle_to_camera(self):
         if self.camera_preview.cap and self.camera_preview.cap.isOpened():
             self.center_stack.setCurrentWidget(self.large_camera)
@@ -1590,6 +1728,22 @@ class MainWindow(QMainWindow):
         self.camera_preview = CameraWidget()
         self.camera_preview.hide()
         lay.addWidget(self.camera_preview)
+        
+        self.btn_virtual_control = QPushButton("VIRTUAL CONTROL: OFF")
+        self.btn_virtual_control.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self.btn_virtual_control.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.TEXT_DIM}; background: {C.PANEL}; 
+                border: 1px solid {C.BORDER}; border-radius: 4px; padding: 4px;
+            }}
+            QPushButton:checked {{
+                color: {C.GREEN}; border: 1px solid {C.GREEN};
+            }}
+        """)
+        self.btn_virtual_control.setCheckable(True)
+        self.btn_virtual_control.hide()
+        self.btn_virtual_control.clicked.connect(self.toggle_virtual_control)
+        lay.addWidget(self.btn_virtual_control)
 
         lay.addSpacing(4)
 
@@ -1877,6 +2031,8 @@ class _RootShim:
 
 class JarvisUI(QObject):
     _camera_toggle_sig = pyqtSignal(bool)
+    _virtual_control_sig = pyqtSignal(bool)
+    _dock_camera_sig = pyqtSignal()
     _toggle_ui_sig = pyqtSignal()
     _notify_sig = pyqtSignal(str, str, int)
     _timer_sig = pyqtSignal(float, str)
@@ -1888,6 +2044,8 @@ class JarvisUI(QObject):
         self._app.setStyle("Fusion")
         self._win = MainWindow(face_path)
         self._camera_toggle_sig.connect(self._handle_camera_toggle, Qt.ConnectionType.QueuedConnection)
+        self._virtual_control_sig.connect(self._win.toggle_virtual_control, Qt.ConnectionType.QueuedConnection)
+        self._dock_camera_sig.connect(self._win.camera_preview.dock, Qt.ConnectionType.QueuedConnection)
         self._toggle_ui_sig.connect(self._win._tray_toggle_visible, Qt.ConnectionType.QueuedConnection)
         self._notify_sig.connect(self._win.notify, Qt.ConnectionType.QueuedConnection)
         self._timer_sig.connect(self._win.start_timer_countdown, Qt.ConnectionType.QueuedConnection)
@@ -1969,6 +2127,14 @@ class JarvisUI(QObject):
         """Toggles the camera preview widget and captures frames."""
         self._camera_toggle_sig.emit(active)
 
+    def set_virtual_control(self, active: bool):
+        """Toggles virtual hand control via UI button state."""
+        self._virtual_control_sig.emit(active)
+
+    def dock_camera_preview(self):
+        """Docks the floating camera preview back to the main UI."""
+        self._dock_camera_sig.emit()
+
     def request_reconnect(self):
         """Requests a reconnection from the live session (e.g. for voice change)."""
         if hasattr(self, '_live_instance'):
@@ -1978,10 +2144,12 @@ class JarvisUI(QObject):
         if active:
             self._win.camera_preview.show()
             self._win.camera_preview.start()
+            self._win.btn_virtual_control.show()
             self._win.toggle_view_btn.show()
         else:
             self._win.camera_preview.stop()
             self._win.camera_preview.hide()
+            self._win.btn_virtual_control.hide()
             if self._win._timer_end_time <= 0:
                 self._win.toggle_view_btn.hide()
             # If large camera was active, switch back to HUD

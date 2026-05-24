@@ -444,6 +444,25 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "toggle_virtual_control",
+        "description": "Activate or deactivate virtual hand control (uses webcam to move mouse and click).",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "active": {"type": "BOOLEAN", "description": "True to activate, False to deactivate."}
+            },
+            "required": ["active"]
+        }
+    },
+    {
+        "name": "dock_camera_preview",
+        "description": "Docks the floating camera preview back into its original place in the Jarvis UI.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
+        }
+    },
+    {
         "name": "read_clipboard",
         "description": "Reads the current contents of the system clipboard out loud. Use when user asks to read what they copied or cut.",
         "parameters": {
@@ -797,6 +816,15 @@ class JarvisLive:
             elif name == "timer":
                 r = await loop.run_in_executor(None, lambda: timer_action(parameters=args, player=self.ui, speak=self.speak))
                 result = r or "Done."
+
+            elif name == "toggle_virtual_control":
+                active = args.get("active", False)
+                self.ui.set_virtual_control(active)
+                result = f"Virtual hand control {'activated' if active else 'deactivated'}."
+
+            elif name == "dock_camera_preview":
+                self.ui.dock_camera_preview()
+                result = "Camera preview docked back to the UI."
 
             elif name == "read_clipboard":
                 r = await loop.run_in_executor(None, lambda: read_clipboard_action(parameters=args, player=self.ui, speak=self.speak))
