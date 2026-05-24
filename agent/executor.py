@@ -189,6 +189,10 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         from actions.dev_agent import dev_agent
         return dev_agent(parameters=parameters, player=None, speak=speak) or "Done."
 
+    elif tool == "deep_research":
+        from agent.researcher import deep_research_action
+        return deep_research_action(parameters=parameters, speak=speak) or "Done."
+
     elif tool == "screen_process":
         from actions.screen_processor import screen_process
         screen_process(parameters=parameters, player=None)
@@ -246,6 +250,7 @@ class AgentExecutor:
         goal:        str,
         speak:       Callable | None        = None,
         cancel_flag: threading.Event | None = None,
+        deadline_minutes: float | None = None,
     ) -> str:
         print(f"\n[Executor] 🎯 Goal: {goal}")
         
@@ -259,17 +264,23 @@ class AgentExecutor:
         
         if is_reactive:
             print("[Executor] 🔄 Entering Reactive Mode (Look-Plan-Act)")
-            return self._execute_reactive(goal, speak, cancel_flag)
+            return self._execute_reactive(goal, speak, cancel_flag, deadline_minutes)
         
-        return self._execute_sequential(goal, speak, cancel_flag)
+        return self._execute_sequential(goal, speak, cancel_flag, deadline_minutes)
 
-    def _execute_reactive(self, goal: str, speak: Callable | None, cancel_flag: threading.Event | None) -> str:
+    def _execute_reactive(self, goal: str, speak: Callable | None, cancel_flag: threading.Event | None, deadline_minutes: float | None = None) -> str:
         completed_steps = []
         step_results    = {}
+        start_time      = time.time()
         
         for i in range(1, self.MAX_REACTIVE_STEPS + 1):
             if cancel_flag and cancel_flag.is_set():
                 return "Task cancelled."
+            if deadline_minutes and (time.time() - start_time) / 60.0 >= deadline_minutes:
+                msg = f"Task paused: Exceeded deadline of {deadline_minutes} minutes."
+                print(f"[Executor] ⏳ {msg}")
+                if speak: speak(msg)
+                return msg
 
             # 1. LOOK: Get AXTree, Compressed DOM, and Screenshot in parallel
             from actions.browser_control import browser_control
@@ -319,7 +330,8 @@ class AgentExecutor:
                 response = generate_content_with_waterfall(
                     [prompt, img], 
                     system_instruction=PLANNER_PROMPT,
-                    is_vision=True
+                    is_vision=True,
+                    prefer_fast=(deadline_minutes is not None and deadline_minutes <= 10)
                 )
                 
                 text = response.text.strip()
@@ -370,11 +382,13 @@ class AgentExecutor:
         goal:        str,
         speak:       Callable | None        = None,
         cancel_flag: threading.Event | None = None,
+        deadline_minutes: float | None      = None,
     ) -> str:
         replan_attempts = 0
         completed_steps = []
         step_results    = {} 
         plan            = create_plan(goal)
+        start_time      = time.time()
 
         while True:
             steps = plan.get("steps", [])
@@ -388,6 +402,11 @@ class AgentExecutor:
             for step in steps:
                 if cancel_flag and cancel_flag.is_set():
                     return "Task cancelled."
+                if deadline_minutes and (time.time() - start_time) / 60.0 >= deadline_minutes:
+                    msg = f"Task paused: Exceeded deadline of {deadline_minutes} minutes."
+                    print(f"[Executor] ⏳ {msg}")
+                    if speak: speak(msg)
+                    return msg
 
                 step_num = step.get("step", "?")
                 tool     = step.get("tool", "generated_code")

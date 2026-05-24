@@ -109,6 +109,10 @@ code_helper
   output_path: string (optional)
   file_path: string (optional)
 
+deep_research
+  goal: string (required) — Complete description of what to research deeply
+  deadline_minutes: number (optional) — Max time allowed for research
+
 dev_agent
   description: string (required)
   language: string (optional)

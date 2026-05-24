@@ -67,7 +67,7 @@ def _real_profile_dir(browser: str) -> str:
 
     if _OS == "Windows":
         m = {
-            "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data" / "Default"],
+            "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data" / "JarvisProfile"],
             "edge":     [Path(local) / "Microsoft"        / "Edge"            / "User Data" / "Default"],
             "brave":    [Path(local) / "BraveSoftware"    / "Brave-Browser"   / "User Data" / "Default"],
             "vivaldi":  [Path(local) / "Vivaldi"          / "User Data" / "Default"],
@@ -216,7 +216,7 @@ def _find_exe_windows(prog_name: str) -> Optional[str]:
 
 _BROWSER_SPECS: dict[str, dict] = {
     "Windows": {
-        "chrome":   {"engine": "chromium", "channel": "chrome",  "bins": []},
+        "chrome":   {"engine": "chromium", "channel": None,      "bins": []},
         "edge":     {"engine": "chromium", "channel": "msedge",  "bins": []},
         "firefox":  {"engine": "firefox",  "channel": None,      "bins": ["firefox.exe"]},
         "opera":    {"engine": "chromium", "channel": None,      "bins": ["opera.exe"],  "special": "opera_windows"},
@@ -226,7 +226,7 @@ _BROWSER_SPECS: dict[str, dict] = {
         "safari":   None,
     },
     "Darwin": {
-        "chrome":   {"engine": "chromium", "channel": "chrome",  "bins": []},
+        "chrome":   {"engine": "chromium", "channel": None,      "bins": []},
         "edge":     {"engine": "chromium", "channel": "msedge",  "bins": ["microsoft-edge"]},
         "firefox":  {"engine": "firefox",  "channel": None,      "bins": ["firefox"]},
         "opera":    {"engine": "chromium", "channel": None,      "bins": ["opera"]},

@@ -98,7 +98,7 @@ class RateLimitError(Exception):
     pass
 
 
-def _plan_project(description: str, language: str) -> dict:
+def _plan_project(description: str, language: str, prefer_fast: bool = False) -> dict:
 
 
     prompt = f"""You are a senior software architect. Create a minimal, complete file plan for this project.
@@ -138,7 +138,7 @@ JSON:"""
 
     try:
         from core.llm_helper import generate_content_with_waterfall
-        response = generate_content_with_waterfall(prompt)
+        response = generate_content_with_waterfall(prompt, prefer_fast=prefer_fast)
         raw = _strip_fences(response.text)
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -155,6 +155,7 @@ def _write_file(
     language: str,
     project_dir: Path,
     already_written: dict[str, str],
+    prefer_fast: bool = False
 ) -> str:
 
 
@@ -218,7 +219,7 @@ Code for {file_path}:"""
 
     try:
         from core.llm_helper import generate_content_with_waterfall
-        response = generate_content_with_waterfall(prompt)
+        response = generate_content_with_waterfall(prompt, prefer_fast=prefer_fast)
         code = _strip_fences(response.text)
 
         full_path = project_dir / file_path
@@ -352,6 +353,7 @@ def _fix_files(
     language: str,
     project_dir: Path,
     entry_point: str,
+    prefer_fast: bool = False
 ) -> dict[str, str]:
 
     from core.llm_helper import generate_content_with_waterfall
@@ -416,7 +418,7 @@ Rules:
 Fixed code for {fix_path}:"""
 
         try:
-            response = generate_content_with_waterfall(prompt)
+            response = generate_content_with_waterfall(prompt, prefer_fast=prefer_fast)
             fixed = _strip_fences(response.text)
 
             full_path = project_dir / fix_path
@@ -440,7 +442,11 @@ def _build_project(
     timeout: int,
     speak=None,
     player=None,
+    deadline_minutes: float | None = None,
 ) -> str:
+
+    start_time = time.time()
+    prefer_fast = bool(deadline_minutes is not None)
 
     def log(msg: str):
         print(f"[DevAgent] {msg}")
@@ -449,7 +455,7 @@ def _build_project(
 
     log("Planning project structure...")
     try:
-        plan = _plan_project(description, language)
+        plan = _plan_project(description, language, prefer_fast=prefer_fast)
     except RateLimitError:
         msg = "Rate limit reached, sir. Please try again in a moment."
         if speak: speak(msg)
@@ -493,6 +499,7 @@ def _build_project(
                     language=language,
                     project_dir=project_dir,
                     already_written=file_codes,
+                    prefer_fast=prefer_fast,
                 )
                 file_codes[file_path] = code
                 time.sleep(0.4)
@@ -522,6 +529,12 @@ def _build_project(
     auto_installs = 0  
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        if deadline_minutes and (time.time() - start_time) / 60.0 >= deadline_minutes:
+            msg = f"Project '{proj_name}' exceeded the {deadline_minutes} min deadline. Paused fixes."
+            log(msg)
+            if speak: speak(msg)
+            return f"{msg}\n\nLast error:\n{last_output[:600]}"
+
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
         last_output = _run_project(run_command, project_dir, timeout)
         log(f"Output preview: {last_output[:150]}")
@@ -557,6 +570,7 @@ def _build_project(
                 language=language,
                 project_dir=project_dir,
                 entry_point=entry_point,
+                prefer_fast=prefer_fast,
             )
             file_codes.update(updated)
             time.sleep(1)
@@ -587,6 +601,7 @@ def dev_agent(
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
     timeout      = int(p.get("timeout", 30))
+    deadline     = p.get("deadline_minutes")
 
     if not description:
         return "Please describe the project you want me to build, sir."
@@ -598,4 +613,5 @@ def dev_agent(
         timeout      = timeout,
         speak        = speak,
         player       = player,
+        deadline_minutes = float(deadline) if deadline is not None else None,
     )

@@ -459,16 +459,14 @@ def screen_process(
         print(f"[Vision] ✅ Waterfall Result: {result_text[:100]}...")
         
         if player:
-            player.speak(result_text)
-        else:
-            print(f"[Vision] 💬 {result_text}")
+            player.write_log(f"[Vision Module] {result_text}")
             
-        return True
+        return result_text
     except Exception as e:
         print(f"[Vision] ❌ Waterfall analysis failed: {e}")
         # Fallback to live session if possible
         _session.analyze(image_bytes, mime_type, user_text)
-        return True
+        return "Image submitted to live vision session."
 
 
 def warmup_session(player=None) -> None:

@@ -45,6 +45,8 @@ from actions.persona_control   import persona_control
 from actions.gmail_handler     import gmail_processor
 from actions.outlook_handler   import outlook_processor
 from actions.github_handler    import github_processor
+from actions.timer             import timer_action
+from actions.clipboard_action  import read_clipboard_action
 
 
 class ReconnectRequested(Exception):
@@ -306,6 +308,7 @@ TOOL_DECLARATIONS = [
                 "language":     {"type": "STRING", "description": "Programming language (default: python)"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
+                "deadline_minutes": {"type": "NUMBER", "description": "Optional deadline for the task in minutes (e.g. 5, 10.5)"},
             },
             "required": ["description"]
         }
@@ -332,7 +335,8 @@ TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {
                 "goal":     {"type": "STRING", "description": "Complete description of what to accomplish"},
-                "priority": {"type": "STRING", "description": "low | normal | high (default: normal)"}
+                "priority": {"type": "STRING", "description": "low | normal | high (default: normal)"},
+                "deadline_minutes": {"type": "NUMBER", "description": "Optional deadline for the task in minutes"}
             },
             "required": ["goal"]
         }
@@ -424,6 +428,27 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {},
+        }
+    },
+    {
+        "name": "timer",
+        "description": "Starts or cancels a countdown timer.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":           {"type": "STRING", "description": "'start' to start a new timer, 'cancel' to stop an active timer.", "enum": ["start", "cancel"]},
+                "duration_seconds": {"type": "NUMBER", "description": "Duration of the timer in seconds (required if action is 'start')"},
+                "message":          {"type": "STRING", "description": "Message to speak when the timer finishes (if starting)"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "read_clipboard",
+        "description": "Reads the current contents of the system clipboard out loud. Use when user asks to read what they copied or cut.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
         }
     },
     {
@@ -658,6 +683,8 @@ class JarvisLive:
         
         parts.append(sys_prompt)
 
+        parts.append("\n[DICTATION RULE]\nIf the user asks you to 'type this in for me' or dictate text to be typed, you MUST use the computer_control 'type' action and provide EXACTLY what the user said as the text. Do not summarize, paraphrase, or hold a conversation about it. Just type the exact text requested.\n")
+
         # Inject recovered conversation history if we are reconnecting after a crash
         if self.session_history:
             parts.append("\n[RECENT CONVERSATION HISTORY (Recovered Context)]\n")
@@ -735,13 +762,14 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "screen_process":
-                threading.Thread(
-                    target=screen_process,
-                    kwargs={"parameters": args, "response": None,
-                            "player": self.ui, "session_memory": None},
-                    daemon=True
-                ).start()
-                result = "Vision module activated. Stay completely silent — vision module will speak directly."
+                r = await loop.run_in_executor(
+                    None, 
+                    lambda: screen_process(parameters=args, response=None, player=self.ui, session_memory=None)
+                )
+                if r == False:
+                    result = "Failed to process screen."
+                else:
+                    result = f"Vision result: {r}\n\n(Note: This is what the vision module saw. Respond naturally to the user's question using this information, and do NOT thank the user for the visual context because you looked at it yourself.)"
 
             elif name == "computer_settings":
                 r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
@@ -763,8 +791,16 @@ class JarvisLive:
                 from agent.task_queue import get_queue, TaskPriority
                 priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
                 priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
-                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
+                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak, deadline_minutes=args.get("deadline_minutes"))
                 result   = f"Task started (ID: {task_id})."
+
+            elif name == "timer":
+                r = await loop.run_in_executor(None, lambda: timer_action(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
+
+            elif name == "read_clipboard":
+                r = await loop.run_in_executor(None, lambda: read_clipboard_action(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
@@ -1070,7 +1106,7 @@ class JarvisLive:
 
             except ReconnectRequested:
                 current_model = LIVE_MODEL
-            except Exception as e:
+            except (Exception, ExceptionGroup, BaseExceptionGroup) as e:
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
                 # Since we only use one model, we just sleep and retry the same model

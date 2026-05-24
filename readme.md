@@ -41,8 +41,10 @@ MARK XXXIX is a powerful evolution of the Jarvis series, now featuring **Moubara
 
 - 🔐 **Secure OAuth & Identity Manager** — A hardware-bound, encrypted vault for your Gmail, Outlook, and GitHub tokens. JARVIS can now securely access your professional life without compromising your safety.
 - 👨‍✈️ **Collaborative 'Pilot' Protocol** — A new "Draft and Handoff" safety layer. JARVIS performs the complex navigation and drafting, while you retain final control over irreversible actions (Send/Post).
-- 🛡️ **Advanced Browser Stability Engine** — A resilient automation layer that auto-detects profile locks and crashes. JARVIS now intelligently switches to safety profiles when your main browser is busy, ensuring 100% uptime.
+- 🛡️ **Advanced Browser Stability Engine** — A resilient automation layer that auto-detects profile locks and crashes. JARVIS now intelligently switches to a dedicated `JarvisProfile` or Playwright's bundled Chromium, ensuring the Accessibility API works perfectly with 100% uptime.
 - 👁️ **Robust Vision Recovery** — Enhanced screen-state analysis that self-corrects tool execution failures in real-time.
+- ⏱️ **Floating UI Elements** — A completely redesigned Timer UI and a Large Camera Preview that can be seamlessly toggled without disrupting the main visual HUD.
+- 🚀 **Next-Gen Gemini Support** — Added native support for `gemini-3.5-flash` and `gemini-3-flash-preview` to the AI waterfall list for bleeding-edge intelligence.
 
 ---
 
