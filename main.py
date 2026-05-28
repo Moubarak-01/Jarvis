@@ -47,6 +47,7 @@ from actions.outlook_handler   import outlook_processor
 from actions.github_handler    import github_processor
 from actions.timer             import timer_action
 from actions.clipboard_action  import read_clipboard_action
+from actions.system_status     import system_status
 
 
 class ReconnectRequested(Exception):
@@ -623,6 +624,16 @@ TOOL_DECLARATIONS = [
             }
         }
     },
+    {
+        "name": "system_status",
+        "description": "Retrieves the system status (CPU, RAM, GPU, Network) or the activity logs.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "stats | logs (default: stats)"}
+            }
+        }
+    },
 ]
 
 class JarvisLive:
@@ -878,6 +889,10 @@ class JarvisLive:
 
             elif name == "github_processor":
                 r = await loop.run_in_executor(None, lambda: github_processor(parameters=args, player=self.ui))
+                result = r or "Done."
+
+            elif name == "system_status":
+                r = await loop.run_in_executor(None, lambda: system_status(parameters=args, player=self.ui))
                 result = r or "Done."
 
             elif name == "shutdown_jarvis":
