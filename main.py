@@ -347,10 +347,10 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | screen_double_click | screen_right_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | move_to | circular_move | square_move | rectangular_move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | screen_double_click | screen_right_click | random_data | user_data | window_control | list_windows | media_control | lock_screen | launch_app | read_screen_text. 'move' = RELATIVE (shifts cursor by x,y pixels from current position). 'move_to' = ABSOLUTE (moves cursor to exact screen coordinate x,y)."},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
-                "x":           {"type": "INTEGER", "description": "X coordinate"},
-                "y":           {"type": "INTEGER", "description": "Y coordinate"},
+                "x":           {"type": "INTEGER", "description": "X coordinate (pixels). For 'move': relative offset (negative=left, positive=right). For 'move_to': absolute screen position."},
+                "y":           {"type": "INTEGER", "description": "Y coordinate (pixels). For 'move': relative offset (negative=up, positive=down). For 'move_to': absolute screen position."},
                 "keys":        {"type": "STRING", "description": "Key combination e.g. 'ctrl+c'"},
                 "key":         {"type": "STRING", "description": "Single key e.g. 'enter'"},
                 "direction":   {"type": "STRING", "description": "up | down | left | right"},
@@ -362,6 +362,16 @@ TOOL_DECLARATIONS = [
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
                 "path":        {"type": "STRING",  "description": "Save path for screenshot"},
+                "radius":      {"type": "INTEGER", "description": "Radius in pixels for circular_move (e.g. 113 ≈ 3cm on a 96 DPI screen)"},
+                "side":        {"type": "INTEGER", "description": "Side length in pixels for square_move"},
+                "width":       {"type": "INTEGER", "description": "Width in pixels for rectangular_move"},
+                "height":      {"type": "INTEGER", "description": "Height in pixels for rectangular_move"},
+                "rotations":   {"type": "INTEGER", "description": "Number of full circles/squares for shape movements (default: 1)"},
+                "duration":    {"type": "NUMBER",  "description": "Duration in seconds for shape animation. Increase this to make it go slower! (default: 4.0)"},
+                "window_action":{"type": "STRING", "description": "minimize | maximize | restore | close"},
+                "title":       {"type": "STRING",  "description": "Title of the window to control. Leave empty or use 'current' to target the active window."},
+                "media_action": {"type": "STRING", "description": "volumeup | volumedown | mute | playpause | next | prev | space (use 'space' to pause/play videos in web browsers like YouTube/Netflix)"},
+                "app_name":    {"type": "STRING",  "description": "Application name to launch via OS start"},
             },
             "required": ["action"]
         }

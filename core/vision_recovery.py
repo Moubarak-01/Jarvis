@@ -57,14 +57,28 @@ def _quick_screenshot() -> tuple[bytes, str] | None:
             shot = sct.grab(target)
             png  = mss.tools.to_png(shot.rgb, shot.size)
 
-        # Compress if large
-        if _PIL and len(png) > 2_000_000:
+        if _PIL:
+            import PIL.ImageDraw
             img = PIL.Image.open(io.BytesIO(png))
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85, optimize=True)
-            return buf.getvalue(), "image/jpeg"
+            
+            local_x = x - target["left"]
+            local_y = y - target["top"]
+            
+            draw = PIL.ImageDraw.Draw(img)
+            r = 8
+            draw.ellipse([local_x-r, local_y-r, local_x+r, local_y+r], fill="red", outline="white", width=2)
+            
+            # Compress if large
+            if len(png) > 2_000_000:
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85, optimize=True)
+                return buf.getvalue(), "image/jpeg"
+            else:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return buf.getvalue(), "image/png"
 
         return png, "image/png"
 

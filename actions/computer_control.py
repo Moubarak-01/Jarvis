@@ -7,6 +7,9 @@ import subprocess
 import sys
 import time
 import random
+import math
+import os
+import ctypes
 from pathlib import Path
 from memory.config_manager import get_gemini_key, get_os_system
 
@@ -23,6 +26,12 @@ try:
     _PYPERCLIP = True
 except ImportError:
     _PYPERCLIP = False
+
+try:
+    import pygetwindow as gw
+    _PYGETWINDOW = True
+except ImportError:
+    _PYGETWINDOW = False
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -188,9 +197,157 @@ def _scroll(direction: str = "down", amount: int = 3) -> str:
 
 
 def _move(x: int, y: int, duration: float = 0.3) -> str:
+    """Relative mouse movement — shifts cursor by (x, y) pixels from current position."""
     _require_pyautogui()
-    pyautogui.moveTo(x, y, duration=duration)
+    pyautogui.move(x, y, duration=duration, tween=pyautogui.linear)
+    return f"Mouse moved by ({x}, {y})"
+
+
+def _move_to(x: int, y: int, duration: float = 0.3) -> str:
+    """Absolute mouse movement — moves cursor to screen coordinate (x, y)."""
+    _require_pyautogui()
+    pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.linear)
     return f"Mouse → ({x}, {y})"
+
+
+def _circular_move(radius_px: int = 100, rotations: int = 1, duration: float = 2.0) -> str:
+    """Move the mouse in a circle around its current position."""
+    _require_pyautogui()
+    cx, cy = pyautogui.position()
+    steps = 60  # points per circle for smoothness
+    total_steps = steps * rotations
+    step_delay = duration / total_steps
+    
+    for i in range(total_steps + 1):
+        angle = (2 * math.pi * i) / steps
+        nx = cx + int(radius_px * math.cos(angle))
+        ny = cy + int(radius_px * math.sin(angle))
+        pyautogui.moveTo(nx, ny, _pause=False)
+        time.sleep(step_delay)
+    
+    # Return to center
+    pyautogui.moveTo(cx, cy, _pause=False)
+    return f"Circular rotation: {rotations}x, radius={radius_px}px"
+
+
+def _square_move(side_px: int = 100, rotations: int = 1, duration: float = 4.0) -> str:
+    """Move the mouse in a square pattern around its current position."""
+    return _rectangular_move(side_px, side_px, rotations, duration)
+
+
+def _rectangular_move(width_px: int = 150, height_px: int = 100, rotations: int = 1, duration: float = 4.0) -> str:
+    """Move the mouse in a rectangular pattern around its current position."""
+    _require_pyautogui()
+    cx, cy = pyautogui.position()
+    
+    tl_x = cx - width_px // 2
+    tl_y = cy - height_px // 2
+    
+    pyautogui.moveTo(tl_x, tl_y, duration=0.2)
+    time_per_side = duration / (4 * rotations)
+    for _ in range(rotations):
+        pyautogui.moveTo(tl_x + width_px, tl_y, duration=time_per_side, tween=pyautogui.linear)
+        pyautogui.moveTo(tl_x + width_px, tl_y + height_px, duration=time_per_side, tween=pyautogui.linear)
+        pyautogui.moveTo(tl_x, tl_y + height_px, duration=time_per_side, tween=pyautogui.linear)
+        pyautogui.moveTo(tl_x, tl_y, duration=time_per_side, tween=pyautogui.linear)
+        
+    pyautogui.moveTo(cx, cy, duration=0.2)
+    return f"Rectangular rotation: {rotations}x, w={width_px}px, h={height_px}px"
+
+
+def _window_control(window_action: str, title: str) -> str:
+    if not _PYGETWINDOW: return "pygetwindow not installed"
+    
+    if not title or title.lower() == "current":
+        win = gw.getActiveWindow()
+        if not win:
+            return "No active window found."
+    else:
+        windows = gw.getWindowsWithTitle(title)
+        if not windows: return f"No window found matching '{title}'"
+        win = windows[0]
+        
+    try:
+        if window_action == "minimize": win.minimize()
+        elif window_action == "maximize": win.maximize()
+        elif window_action == "restore": win.restore()
+        elif window_action == "close": win.close()
+        else: return f"Unknown window action: {window_action}"
+        return f"Window '{win.title}' -> {window_action}"
+    except Exception as e:
+        return f"Window action failed: {e}"
+
+
+def _list_windows() -> str:
+    if not _PYGETWINDOW: return "pygetwindow not installed"
+    titles = [w for w in gw.getAllTitles() if w.strip()]
+    return "Open Windows:\n" + "\n".join(titles)
+
+
+def _media_control(action: str) -> str:
+    _require_pyautogui()
+    keys = {
+        "volumeup": "volumeup",
+        "volumedown": "volumedown",
+        "mute": "volumemute",
+        "playpause": "playpause",
+        "next": "nexttrack",
+        "prev": "prevtrack",
+        "space": "space"
+    }
+    if action not in keys: return f"Unknown media action: {action}"
+    pyautogui.press(keys[action])
+    return f"Media control: {action}"
+
+
+def _lock_screen() -> str:
+    if os.name == 'nt':
+        ctypes.windll.user32.LockWorkStation()
+        return "Screen locked."
+    return "Lock screen only supported on Windows."
+
+
+def _launch_app(app_name: str) -> str:
+    if os.name == 'nt':
+        os.system(f'start "" "{app_name}"')
+        return f"Launched: {app_name}"
+    return "App launching currently supported via OS native start."
+
+
+def _draw_cursor_on_image(img_pil):
+    try:
+        import pyautogui
+        import PIL.ImageDraw
+        x, y = pyautogui.position()
+        draw = PIL.ImageDraw.Draw(img_pil)
+        r = 8  # radius of the red dot
+        draw.ellipse([x-r, y-r, x+r, y+r], fill="red", outline="white", width=2)
+    except Exception as e:
+        print(f"[ComputerControl] Failed to draw cursor: {e}")
+    return img_pil
+
+
+def _read_screen_text() -> str:
+    api_key = _get_api_key()
+    if not api_key: return "No API key for screen reading."
+    try:
+        from google import genai
+        _require_pyautogui()
+        img = pyautogui.screenshot()
+        img = _draw_cursor_on_image(img)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
+        
+        prompt = "Read all the text visible in this screenshot. Reply with ONLY the extracted text, formatted nicely."
+        from core.llm_helper import generate_content_with_waterfall
+        import PIL.Image
+        img_pil = PIL.Image.open(io.BytesIO(image_bytes))
+        
+        response = generate_content_with_waterfall([prompt, img_pil], is_vision=True)
+        return (response.text or "").strip()
+    except Exception as e:
+        return f"read_screen_text failed: {e}"
 
 
 def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
@@ -230,8 +387,9 @@ def _screenshot(save_path: str | None = None) -> str:
     _require_pyautogui()
     path = _safe_screenshot_path(save_path)
     img  = pyautogui.screenshot()
-    img.save(str(path))
-    return f"Screenshot saved: {path}"
+    img  = _draw_cursor_on_image(img)
+    img.save(path)
+    return f"Screenshot saved to {path}"
 
 
 def _clear_field() -> str:
@@ -309,13 +467,17 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         _require_pyautogui()
         w, h  = pyautogui.size()
         img   = pyautogui.screenshot()
+        img   = _draw_cursor_on_image(img)
         buf   = io.BytesIO()
         img.save(buf, format="PNG")
         image_bytes = buf.getvalue()
 
+        cx, cy = pyautogui.position()
+
         client = genai.Client(api_key=api_key)
         prompt = (
             f"This is a screenshot of a {w}×{h} pixel screen. "
+            f"The mouse cursor is currently located at X: {cx}, Y: {cy} (marked by the red dot). "
             f"Locate the UI element described as: '{description}'. "
             f"Reply with ONLY the center coordinates as: x,y "
             f"If the element is not visible, reply: NOT_FOUND"
@@ -424,7 +586,63 @@ def computer_control(
             return _click(params.get("x"), params.get("y"), "right", 1)
 
         if action == "move":
-            return _move(int(params.get("x", 0)), int(params.get("y", 0)))
+            x = int(params.get("x", 0))
+            y = int(params.get("y", 0))
+            direction = params.get("direction", "").lower()
+            if direction:
+                val = int(params.get("amount", 0)) or abs(x) or abs(y) or 50
+                if direction == "left":
+                    x, y = -abs(val), 0
+                elif direction == "right":
+                    x, y = abs(val), 0
+                elif direction == "up":
+                    x, y = 0, -abs(val)
+                elif direction == "down":
+                    x, y = 0, abs(val)
+            return _move(x, y)
+
+        if action == "move_to":
+            return _move_to(int(params.get("x", 0)), int(params.get("y", 0)))
+
+        if action == "circular_move":
+            return _circular_move(
+                radius_px=int(params.get("radius", 100)),
+                rotations=int(params.get("rotations", 1)),
+                duration=float(params.get("duration", 2.0)),
+            )
+
+        if action == "square_move":
+            return _square_move(
+                side_px=int(params.get("side", 100)),
+                rotations=int(params.get("rotations", 1)),
+                duration=float(params.get("duration", 2.0)),
+            )
+
+        if action == "rectangular_move":
+            return _rectangular_move(
+                width_px=int(params.get("width", 150)),
+                height_px=int(params.get("height", 100)),
+                rotations=int(params.get("rotations", 1)),
+                duration=float(params.get("duration", 2.0)),
+            )
+
+        if action == "window_control":
+            return _window_control(params.get("window_action", ""), params.get("title", ""))
+
+        if action == "list_windows":
+            return _list_windows()
+
+        if action == "media_control":
+            return _media_control(params.get("media_action", ""))
+
+        if action == "lock_screen":
+            return _lock_screen()
+
+        if action == "launch_app":
+            return _launch_app(params.get("app_name", ""))
+
+        if action == "read_screen_text":
+            return _read_screen_text()
 
         if action == "drag":
             return _drag(
