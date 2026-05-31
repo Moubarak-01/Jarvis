@@ -15,7 +15,7 @@ def get_base_dir():
 
 BASE_DIR         = get_base_dir()
 # API_CONFIG_PATH removed
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
+PROJECTS_DIR     = Path.home() / "Downloads" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 MODEL_PLANNER    = "gemma-4-31b-it"
 MODEL_WRITER     = "gemma-4-31b-it"
@@ -109,30 +109,31 @@ Description: {description}
 Return ONLY valid JSON — no markdown, no explanation:
 {{
   "project_name": "snake_case_name",
-  "entry_point": "main.py",
+  "entry_point": "src/main.rs",
   "files": [
     {{
-      "path": "main.py",
+      "path": "src/main.rs",
       "description": "Entry point — what it does and which modules it imports",
-      "imports": ["utils.helpers", "core.engine"]
+      "imports": ["utils::helpers"]
     }},
     {{
-      "path": "utils/helpers.py",
+      "path": "src/utils/helpers.rs",
       "description": "Helper utilities — what functions it exposes",
       "imports": []
     }}
   ],
-  "run_command": "python main.py",
-  "dependencies": ["requests"]
+  "install_command": "cargo add rand && cargo build",
+  "run_command": "cargo run"
 }}
 
 Critical rules:
-1. List files in DEPENDENCY ORDER — files with no imports come first, entry point comes last.
-2. The "imports" field must list every other project module this file imports (dot-notation, e.g. "utils.helpers").
-3. Keep it minimal — only files truly needed.
-4. Entry point must be in the files list.
-5. Use relative paths only (e.g. "utils/helpers.py", not absolute paths).
-6. Standard library modules (os, sys, json, etc.) do NOT go in "dependencies".
+1. Adapt the file paths, extensions, and structure to standard conventions for the requested language ({language}).
+2. List files in DEPENDENCY ORDER — files with no imports come first, entry point comes last.
+3. The "imports" field must list project-internal modules this file imports.
+4. Keep it minimal — only files truly needed.
+5. Entry point must be in the files list.
+6. Provide a single 'install_command' string to install any required 3rd-party dependencies. Leave empty string if none.
+7. Provide a single 'run_command' string to start the application.
 
 JSON:"""
 
@@ -176,7 +177,7 @@ def _write_file(
             dependency_context += f"\n\n--- {dep_path} (you must import from this) ---\n{code_snippet}"
 
     lang_rules = ""
-    if language.lower() == "python":
+    if language.lower() in ("python", "py"):
         lang_rules = """
 Python-specific rules:
 - Use type hints for all function signatures.
@@ -185,12 +186,15 @@ Python-specific rules:
 - For relative imports within the project, use: from utils.helpers import foo  (match the project structure exactly).
 - Do NOT use implicit relative imports (from . import ...) unless it's a proper package with __init__.py.
 - If this is a package subdirectory, create __init__.py files where needed."""
-    elif language.lower() in ("javascript", "typescript", "js", "ts"):
+    elif language.lower() in ("javascript", "typescript", "js", "ts", "node", "nodejs"):
         lang_rules = """
 JS/TS-specific rules:
 - Use ES modules (import/export), not CommonJS (require).
 - Add JSDoc comments for all exported functions.
+- For TypeScript, use proper typing.
 - Handle promise rejections with try/catch in async functions."""
+    else:
+        lang_rules = f"\nSpecific rules for {language}:\n- Follow standard best practices and idioms for {language}."
 
     prompt = f"""You are a senior {language} developer writing production-quality code for a real project.
 
@@ -234,71 +238,76 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
-def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
-    if not dependencies:
-        return "No external dependencies."
+def _install_dependencies(install_command: str, project_dir: Path) -> str:
+    if not install_command or not install_command.strip():
+        return "No installation command required."
 
-    to_install = []
-    for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            to_install.append(dep)
-        else:
-            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
-
-    if not to_install:
-        return f"All dependencies already installed: {', '.join(dependencies)}"
-
-    print(f"[DevAgent] 📦 Installing: {to_install}")
+    print(f"[DevAgent] 📦 Running install: {install_command}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
+            install_command,
+            shell=True,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            timeout=120, cwd=str(project_dir)
+            timeout=180, cwd=str(project_dir)
         )
         if result.returncode == 0:
-            return f"Installed: {', '.join(to_install)}"
-        return f"Install warning (non-fatal): {result.stderr[:200]}"
+            return f"Installed successfully."
+        return f"Install warning (non-fatal):\n{result.stderr[:500]}"
     except subprocess.TimeoutExpired:
         return "Dependency install timed out (non-fatal)."
     except Exception as e:
         return f"Install error (non-fatal): {e}"
 
-def _open_vscode(project_dir: Path) -> bool:
-    vscode_candidates = [
-        "code",
-        rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
-        r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
-    ]
-    for cmd in vscode_candidates:
+def _open_ide(project_dir: Path, ide: str) -> bool:
+    if not ide or ide.lower() == "none":
+        return False
+        
+    ide = ide.lower()
+    if ide == "vscode" or "vs code" in ide:
+        vscode_candidates = [
+            "code",
+            rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
+            r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+        ]
+        for cmd in vscode_candidates:
+            try:
+                subprocess.Popen(
+                    [cmd, str(project_dir)],
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                time.sleep(1.5)
+                print(f"[DevAgent] 💻 VSCode opened: {project_dir}")
+                return True
+            except Exception:
+                continue
+    elif ide == "antigravity":
         try:
             subprocess.Popen(
-                [cmd, str(project_dir)],
+                ["antigravity-ide.cmd", str(project_dir)],
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
             time.sleep(1.5)
-            print(f"[DevAgent] 💻 VSCode opened: {project_dir}")
+            print(f"[DevAgent] 💻 Antigravity IDE opened: {project_dir}")
             return True
         except Exception:
-            continue
+            print(f"[DevAgent] 💻 Project created at: {project_dir}. Open it in Antigravity IDE.")
+            return False
     return False
 
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
+        if run_command.strip().startswith("python "):
+            run_command = run_command.replace("python ", f'"{sys.executable}" ', 1)
 
         result = subprocess.run(
-            parts,
+            run_command,
+            shell=True,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
@@ -440,6 +449,7 @@ def _build_project(
     language: str,
     project_name: str,
     timeout: int,
+    ide: str = "none",
     speak=None,
     player=None,
     deadline_minutes: float | None = None,
@@ -519,11 +529,17 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
-        install_result = _install_dependencies(dependencies, project_dir)
+    install_cmd = plan.get("install_command", "")
+    if not install_cmd and plan.get("dependencies"):
+        deps = plan.get("dependencies", [])
+        if isinstance(deps, list) and deps:
+            install_cmd = f'"{sys.executable}" -m pip install ' + " ".join(deps)
+
+    if install_cmd:
+        install_result = _install_dependencies(install_cmd, project_dir)
         log(install_result)
 
-    _open_vscode(project_dir)
+    _open_ide(project_dir, ide)
 
     last_output   = ""
     auto_installs = 0  
@@ -601,6 +617,7 @@ def dev_agent(
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
     timeout      = int(p.get("timeout", 30))
+    ide          = p.get("ide", "none").strip()
     deadline     = p.get("deadline_minutes")
 
     if not description:
@@ -611,6 +628,7 @@ def dev_agent(
         language     = language,
         project_name = project_name,
         timeout      = timeout,
+        ide          = ide,
         speak        = speak,
         player       = player,
         deadline_minutes = float(deadline) if deadline is not None else None,

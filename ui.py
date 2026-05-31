@@ -1387,10 +1387,10 @@ class MainWindow(QMainWindow):
         if not self._ready:
             self._show_setup()
 
-        sc_mute = QShortcut(QKeySequence("F4"), self)
-        sc_mute.activated.connect(self._toggle_mute)
-        sc_full = QShortcut(QKeySequence("F11"), self)
-        sc_full.activated.connect(self._toggle_fullscreen)
+        self.sc_mute = QShortcut(QKeySequence("Shift+M"), self)
+        self.sc_mute.activated.connect(self._toggle_mute)
+        self.sc_full = QShortcut(QKeySequence("Shift+F"), self)
+        self.sc_full.activated.connect(self._toggle_fullscreen)
 
         # ── System Tray ──────────────────────────────────────
         self._quit_from_tray = False
@@ -1423,6 +1423,11 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _toggle_fullscreen(self):
+        import time
+        if hasattr(self, '_last_fs_t') and time.time() - self._last_fs_t < 0.2:
+            return
+        self._last_fs_t = time.time()
+        
         if self.isFullScreen():
             self.showNormal()
         else:
@@ -1719,6 +1724,9 @@ class MainWindow(QMainWindow):
         self._bar_gpu = MetricBar("GPU", C.ACC)
         self._bar_tmp = MetricBar("TMP", "#ff6688")
 
+        self._bar_gpu.hide()
+        self._bar_tmp.hide()
+
         for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
                     self._bar_gpu, self._bar_tmp]:
             lay.addWidget(bar)
@@ -1856,7 +1864,7 @@ class MainWindow(QMainWindow):
         self._style_mute_btn()
         lay.addWidget(self._mute_btn)
 
-        fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
+        fs_btn = QPushButton("⛶  FULLSCREEN  [Shift+F]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
         fs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1916,7 +1924,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
+        lay.addWidget(_fl("[Shift+M] Mute  ·  [Shift+F] Fullscreen"))
         lay.addStretch()
         lay.addWidget(_fl("Moubarak Industries  ·  MARK XXXIX  ·  CLASSIFIED"))
         lay.addStretch()
@@ -1941,6 +1949,11 @@ class MainWindow(QMainWindow):
             threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
 
     def _toggle_mute(self):
+        import time
+        if hasattr(self, '_last_mute_t') and time.time() - self._last_mute_t < 0.2:
+            return
+        self._last_mute_t = time.time()
+        
         self._muted = not self._muted
         self.hud.muted = self._muted
         self._style_mute_btn()
@@ -2057,6 +2070,12 @@ class JarvisUI(QObject):
         try:
             import keyboard
             keyboard.add_hotkey('ctrl+j', self._on_ctrl_j)
+            keyboard.add_hotkey('shift+m', lambda: QTimer.singleShot(0, self._win._toggle_mute))
+            keyboard.add_hotkey('shift+f', lambda: QTimer.singleShot(0, self._win._toggle_fullscreen))
+            
+            # Disable local shortcuts to prevent double triggering when window is focused
+            self._win.sc_mute.setEnabled(False)
+            self._win.sc_full.setEnabled(False)
         except ImportError:
             print("[UI] ⚠️ 'keyboard' module not installed. Global shortcut disabled.")
 

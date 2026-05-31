@@ -12,6 +12,16 @@ def system_status(parameters: dict = None, response=None, player=None, session_m
             logs = player._win._log.toPlainText()
             return f"Activity Logs:\n{logs}"
             
+        elif action == "show_gpu":
+            player._win._bar_gpu.show()
+            player._win._bar_tmp.show()
+            return "GPU and Temperature are now visible on the UI."
+            
+        elif action == "hide_gpu":
+            player._win._bar_gpu.hide()
+            player._win._bar_tmp.hide()
+            return "GPU and Temperature are now hidden from the UI."
+            
         elif action == "stats":
             # Retrieve metrics from the globally available _metrics in ui module
             from ui import _metrics

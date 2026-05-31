@@ -301,14 +301,15 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "dev_agent",
-        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
+        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens requested IDE, runs and fixes errors.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "description":  {"type": "STRING", "description": "What the project should do"},
-                "language":     {"type": "STRING", "description": "Programming language (default: python)"},
+                "language":     {"type": "STRING", "description": "Programming language (e.g. python, javascript, rust). Default: python"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
+                "ide":          {"type": "STRING", "description": "The IDE to open: 'vscode', 'antigravity', or 'none'. You MUST ask the user their preference before running this tool, or default to 'none' if they didn't specify."},
                 "deadline_minutes": {"type": "NUMBER", "description": "Optional deadline for the task in minutes (e.g. 5, 10.5)"},
             },
             "required": ["description"]
@@ -626,11 +627,11 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "system_status",
-        "description": "Retrieves the system status (CPU, RAM, GPU, Network) or the activity logs.",
+        "description": "Retrieves the system status (CPU, RAM, GPU, Network), activity logs, or controls UI visibility of GPU/Temperature.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "stats | logs (default: stats)"}
+                "action": {"type": "STRING", "description": "stats | logs | show_gpu | hide_gpu (default: stats)"}
             }
         }
     },
@@ -723,7 +724,7 @@ class JarvisLive:
         
         parts.append(sys_prompt)
 
-        parts.append("\n[DICTATION RULE]\nIf the user asks you to 'type this in for me' or dictate text to be typed, you MUST use the computer_control 'type' action and provide EXACTLY what the user said as the text. Do not summarize, paraphrase, or hold a conversation about it. Just type the exact text requested.\n")
+        parts.append("\n[DICTATION RULE]\nIf the user asks you to 'type this in for me' or dictate text, you MUST use the computer_control 'type' action. Normally, provide EXACTLY what the user said. However, if the user explicitly asks you to 'rewrite it professionally' or 'clean it up', you should remove filler words (like 'um', 'uh', 'like') and rewrite the text in a clean, polite, and professional manner before typing it. If they don't ask for a cleanup, just type the exact text requested.\n")
 
         # Inject recovered conversation history if we are reconnecting after a crash
         if self.session_history:
