@@ -1387,9 +1387,9 @@ class MainWindow(QMainWindow):
         if not self._ready:
             self._show_setup()
 
-        self.sc_mute = QShortcut(QKeySequence("Shift+M"), self)
+        self.sc_mute = QShortcut(QKeySequence("Ctrl+Shift+M"), self)
         self.sc_mute.activated.connect(self._toggle_mute)
-        self.sc_full = QShortcut(QKeySequence("Shift+F"), self)
+        self.sc_full = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
         self.sc_full.activated.connect(self._toggle_fullscreen)
 
         # ── System Tray ──────────────────────────────────────
@@ -1864,7 +1864,7 @@ class MainWindow(QMainWindow):
         self._style_mute_btn()
         lay.addWidget(self._mute_btn)
 
-        fs_btn = QPushButton("⛶  FULLSCREEN  [Shift+F]")
+        fs_btn = QPushButton("⛶  FULLSCREEN  [Ctrl+Shift+F]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
         fs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1924,7 +1924,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[Shift+M] Mute  ·  [Shift+F] Fullscreen"))
+        lay.addWidget(_fl("[Ctrl+Shift+M] Mute  ·  [Ctrl+Shift+F] Fullscreen"))
         lay.addStretch()
         lay.addWidget(_fl("Moubarak Industries  ·  MARK XXXIX  ·  CLASSIFIED"))
         lay.addStretch()
@@ -2070,8 +2070,8 @@ class JarvisUI(QObject):
         try:
             import keyboard
             keyboard.add_hotkey('ctrl+j', self._on_ctrl_j)
-            keyboard.add_hotkey('shift+m', lambda: QTimer.singleShot(0, self._win._toggle_mute))
-            keyboard.add_hotkey('shift+f', lambda: QTimer.singleShot(0, self._win._toggle_fullscreen))
+            keyboard.add_hotkey('ctrl+shift+m', lambda: QTimer.singleShot(0, self._win._toggle_mute))
+            keyboard.add_hotkey('ctrl+shift+f', lambda: QTimer.singleShot(0, self._win._toggle_fullscreen))
             
             # Disable local shortcuts to prevent double triggering when window is focused
             self._win.sc_mute.setEnabled(False)
