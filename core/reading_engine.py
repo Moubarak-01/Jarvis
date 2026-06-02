@@ -4,12 +4,11 @@ import tempfile
 import pygame
 import edge_tts
 import json
-from google import genai
-from google.genai import types
 from memory.memory_manager import load_memory
+from core.llm_helper import generate_content_with_waterfall
 
 class ReadingEngine:
-    """Dedicated offline TTS engine for reading extremely long texts and dialogues."""
+    """Dedicated offline TTS engine for reading extremely long texts and mixed-dialogues."""
     
     def __init__(self, voice="en-US-ChristopherNeural"):
         self.voice = voice
@@ -22,52 +21,9 @@ class ReadingEngine:
             "en-NZ-MitchellNeural", "en-ZA-LukeNeural", "en-US-AriaNeural",
             "en-GB-SoniaNeural", "en-US-GuyNeural"
         ]
-        
-    async def _analyze_text(self, text: str) -> dict:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return {"is_dialogue": False}
-        try:
-            client = genai.Client(api_key=api_key)
-            prompt = (
-                "Analyze the following text to determine if it is a dialogue/script with multiple speakers, "
-                "or just a normal article/text block. If it is a dialogue, extract the segments in order. "
-                "If it's an article but has quotes, treat it as normal (is_dialogue: false) unless it is distinctly formatted as a script.\n\n"
-                f"TEXT:\n{text[:5000]}"
-            )
-            
-            response = await client.aio.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema={
-                        "type": "OBJECT",
-                        "properties": {
-                            "is_dialogue": {"type": "BOOLEAN"},
-                            "segments": {
-                                "type": "ARRAY",
-                                "items": {
-                                    "type": "OBJECT",
-                                    "properties": {
-                                        "speaker": {"type": "STRING"},
-                                        "text": {"type": "STRING"}
-                                    },
-                                    "required": ["speaker", "text"]
-                                }
-                            }
-                        },
-                        "required": ["is_dialogue"]
-                    }
-                )
-            )
-            return json.loads(response.text)
-        except Exception as e:
-            print(f"[ReadingEngine] AI Analysis failed: {e}")
-            return {"is_dialogue": False}
             
     async def read_aloud(self, text: str, voice_override: str = None):
-        """Generates TTS audio and plays it in chunks, supporting dialogues."""
+        """Generates TTS audio and plays it in chunks, dynamically handling mixed articles and dialogues."""
         
         # Dynamically fetch the current persona voice from memory
         memory = load_memory()
@@ -89,23 +45,60 @@ class ReadingEngine:
         try:
             import re
             
-            # Analyze text to see if it's a dialogue
-            analysis = await self._analyze_text(text)
-            is_dialogue = analysis.get("is_dialogue", False)
+            prompt = (
+                "You are an advanced text parser. Analyze the following text and segment it into sequential reading chunks. "
+                "The text may contain standard article paragraphs, section headers, AND multi-speaker dialogue scripts.\n\n"
+                "RULES:\n"
+                "1. If a section is a normal article, header, or paragraph, classify it as type='normal' and put the text in the 'text' field. Do not extract speaker for normal sections.\n"
+                "2. If a section is a scripted dialogue between characters (e.g. 'SpeakerName: text' or 'SpeakerName (Action): text'), classify it as type='dialogue', extract the 'speaker' name, and put the spoken text in the 'text' field.\n"
+                "3. CRITICAL: For dialogue segments, you MUST include any parenthetical thoughts, actions, or stage directions (e.g., '(Kinetic Mask \u2014 ...)') inside the 'text' field so it is spoken out loud. Do NOT discard them!\n"
+                "4. Output a JSON array of these segment objects in the exact order they appear.\n\n"
+                f"TEXT:\n{text[:8000]}"
+            )
+
+            config_dict = {
+                "response_mime_type": "application/json",
+                "response_schema": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "type": {"type": "STRING"},
+                            "speaker": {"type": "STRING"},
+                            "text": {"type": "STRING"}
+                        },
+                        "required": ["type", "text"]
+                    }
+                }
+            }
+
+            try:
+                response = await asyncio.to_thread(
+                    generate_content_with_waterfall,
+                    prompt,
+                    None,  # system_instruction
+                    False, # is_vision
+                    config_dict,
+                    True   # prefer_fast
+                )
+                segments = json.loads(response.text)
+            except Exception as e:
+                print(f"[ReadingEngine] AI Analysis failed, defaulting to normal reading: {e}")
+                # Fallback to a single normal segment
+                segments = [{"type": "normal", "text": text}]
             
             chunks = []
+            speaker_voices = {}
+            available_voices = self.voice_pool.copy()
             
-            if is_dialogue and "segments" in analysis and analysis["segments"]:
-                print("[ReadingEngine] Dialogue detected! Assigning voices...")
-                speaker_voices = {}
-                available_voices = self.voice_pool.copy()
+            for seg in segments:
+                seg_type = seg.get("type", "normal")
+                txt = seg.get("text", "")
                 
-                for seg in analysis["segments"]:
-                    spk = seg["speaker"]
-                    txt = seg["text"]
+                if seg_type == "dialogue":
+                    spk = seg.get("speaker", "Unknown")
                     spk_lower = spk.lower().strip()
                     
-                    # Assign narrator/user to default voice
                     if spk_lower in ["me", "self", "narrator", "author"]:
                         v = self.voice
                     else:
@@ -114,34 +107,22 @@ class ReadingEngine:
                             speaker_voices[spk] = v
                         else:
                             v = speaker_voices[spk]
-                            
-                    # Chunk the segment text
-                    clean_txt = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', txt)
-                    clean_txt = re.sub(r'[*_#>`~-]', '', clean_txt)
-                    sentences = re.split(r'(?<=[.!?\n])\s+', clean_txt)
-                    current_chunk = ""
-                    for sentence in sentences:
-                        if len(current_chunk) + len(sentence) < 2000:
-                            current_chunk += sentence + " "
-                        else:
-                            if current_chunk: chunks.append({"voice": v, "text": current_chunk.strip()})
-                            current_chunk = sentence + " "
-                    if current_chunk:
-                        chunks.append({"voice": v, "text": current_chunk.strip()})
-            else:
-                # Normal reading
-                clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-                clean_text = re.sub(r'[*_#>`~-]', '', clean_text)
-                sentences = re.split(r'(?<=[.!?\n])\s+', clean_text)
+                else:
+                    v = self.voice
+                        
+                # Chunk the segment text to avoid Edge-TTS limits
+                clean_txt = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', txt)
+                clean_txt = re.sub(r'[*_#>`~-]', '', clean_txt)
+                sentences = re.split(r'(?<=[.!?\n])\s+', clean_txt)
                 current_chunk = ""
                 for sentence in sentences:
                     if len(current_chunk) + len(sentence) < 2000:
                         current_chunk += sentence + " "
                     else:
-                        if current_chunk: chunks.append({"voice": self.voice, "text": current_chunk.strip()})
+                        if current_chunk: chunks.append({"voice": v, "text": current_chunk.strip()})
                         current_chunk = sentence + " "
                 if current_chunk:
-                    chunks.append({"voice": self.voice, "text": current_chunk.strip()})
+                    chunks.append({"voice": v, "text": current_chunk.strip()})
 
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
