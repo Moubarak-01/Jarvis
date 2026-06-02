@@ -794,6 +794,15 @@ class JarvisLive:
     async def _handle_long_text_reading(self, text: str, voice_override: str = None):
         """Option B: Try to use Dedicated Reading Engine. Option A: Fallback to Auto-Feeder."""
         try:
+            # INSTANTLY MUTE JARVIS: Skip whatever he was going to say
+            if getattr(self, 'audio_in_queue', None):
+                while not self.audio_in_queue.empty():
+                    try:
+                        self.audio_in_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+            self._ignore_audio_until = time.time() + 2.0
+            
             print("[JARVIS] 📖 Triggering dedicated reading engine...")
             if self.ui:
                 self.ui.set_state("SPEAKING")

@@ -4,6 +4,7 @@ import tempfile
 import pygame
 import edge_tts
 import json
+import re
 from memory.memory_manager import load_memory
 from core.llm_helper import generate_content_with_waterfall
 
@@ -14,6 +15,9 @@ class ReadingEngine:
         self.voice = voice
         self.is_playing = False
         self._current_task = None
+        self._stop_requested = False
+        self._pause_requested = False
+        self.is_paused = False
         # Extended voice pool for dialogues
         self.voice_pool = [
             "en-US-SteffanNeural", "en-US-JennyNeural", "en-GB-RyanNeural", 
@@ -21,6 +25,38 @@ class ReadingEngine:
             "en-NZ-MitchellNeural", "en-ZA-LukeNeural", "en-US-AriaNeural",
             "en-GB-SoniaNeural", "en-US-GuyNeural"
         ]
+
+    def _regex_parse_dialogue(self, text):
+        """Attempts to parse dialogue locally. Returns None if ambiguous or not a dialogue."""
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        segments = []
+        dialogue_count = 0
+        
+        # Match Speaker Name (Action): Text
+        pattern = re.compile(r'^(?:\*\*|\*|_)?([A-Za-z0-9\s-]{2,15}?)(?:\*\*|\*|_)?\s*(?:\((.*?)\))?\s*(?:\*\*|\*|_)?:\s*(?:\*\*|\*|_)?(.*)', re.DOTALL)
+        
+        for p in paragraphs:
+            match = pattern.match(p)
+            if match:
+                speaker = match.group(1).strip()
+                action = match.group(2)
+                spoken = match.group(3).strip()
+                
+                # Check for suspicious markdown headers being matched as speakers
+                if speaker.lower().startswith("the ") or len(speaker) > 15:
+                    return None # Ambiguous, fallback to API
+                    
+                text_out = f"({action}) {spoken}" if action else spoken
+                segments.append({"type": "dialogue", "speaker": speaker, "text": text_out})
+                dialogue_count += 1
+            else:
+                segments.append({"type": "normal", "text": p})
+                
+        # Only use regex if we confidently found a multi-line dialogue
+        if dialogue_count < 2:
+            return None 
+            
+        return segments
             
     async def read_aloud(self, text: str, voice_override: str = None):
         """Generates TTS audio and plays it in chunks, dynamically handling mixed articles and dialogues."""
@@ -43,49 +79,52 @@ class ReadingEngine:
         self._pause_requested = False
         self.is_paused = False
         try:
-            import re
+            # 1. Try Fast Local Regex Parsing
+            segments = self._regex_parse_dialogue(text)
             
-            prompt = (
-                "You are an advanced text parser. Analyze the following text and segment it into sequential reading chunks. "
-                "The text may contain standard article paragraphs, section headers, AND multi-speaker dialogue scripts.\n\n"
-                "RULES:\n"
-                "1. If a section is a normal article, header, or paragraph, classify it as type='normal' and put the text in the 'text' field. Do not extract speaker for normal sections.\n"
-                "2. If a section is a scripted dialogue between characters (e.g. 'SpeakerName: text' or 'SpeakerName (Action): text'), classify it as type='dialogue', extract the 'speaker' name, and put the spoken text in the 'text' field.\n"
-                "3. CRITICAL: For dialogue segments, you MUST include any parenthetical thoughts, actions, or stage directions (e.g., '(Kinetic Mask \u2014 ...)') inside the 'text' field so it is spoken out loud. Do NOT discard them!\n"
-                "4. Output a JSON array of these segment objects in the exact order they appear.\n\n"
-                f"TEXT:\n{text[:8000]}"
-            )
-
-            config_dict = {
-                "response_mime_type": "application/json",
-                "response_schema": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "type": {"type": "STRING"},
-                            "speaker": {"type": "STRING"},
-                            "text": {"type": "STRING"}
-                        },
-                        "required": ["type", "text"]
+            # 2. API Fallback if Regex fails or is ambiguous
+            if segments is None:
+                print("[ReadingEngine] Regex parsing ambiguous, falling back to API parser...")
+                prompt = (
+                    "You are an advanced text parser. Analyze the following text and segment it into sequential reading chunks. "
+                    "The text may contain standard article paragraphs, section headers, AND multi-speaker dialogue scripts.\n\n"
+                    "RULES:\n"
+                    "1. If a section is a normal article, header, or paragraph, classify it as type='normal' and put the text in the 'text' field. Do not extract speaker for normal sections.\n"
+                    "2. If a section is a scripted dialogue, extract ONLY the character's base name (e.g., 'Elena', 'Me') for the 'speaker' field. Do NOT put actions or parentheses in the speaker field.\n"
+                    "3. CRITICAL: For dialogue segments, you MUST extract any parenthetical thoughts, actions, or stage directions (e.g., '(Kinetic Mask \u2014 ...)') and prepend them inside the 'text' field so they are spoken out loud. Example: If the raw text is 'Elena (Angry): Stop!', the output text MUST be '(Angry) Stop!'. Do NOT discard them!\n"
+                    "4. Output a JSON array of these segment objects in the exact order they appear.\n\n"
+                    f"TEXT:\n{text[:8000]}"
+                )
+    
+                config_dict = {
+                    "response_mime_type": "application/json",
+                    "response_schema": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "type": {"type": "STRING"},
+                                "speaker": {"type": "STRING"},
+                                "text": {"type": "STRING"}
+                            },
+                            "required": ["type", "text"]
+                        }
                     }
                 }
-            }
-
-            try:
-                response = await asyncio.to_thread(
-                    generate_content_with_waterfall,
-                    prompt,
-                    None,  # system_instruction
-                    False, # is_vision
-                    config_dict,
-                    True   # prefer_fast
-                )
-                segments = json.loads(response.text)
-            except Exception as e:
-                print(f"[ReadingEngine] AI Analysis failed, defaulting to normal reading: {e}")
-                # Fallback to a single normal segment
-                segments = [{"type": "normal", "text": text}]
+    
+                try:
+                    response = await asyncio.to_thread(
+                        generate_content_with_waterfall,
+                        prompt,
+                        None,  # system_instruction
+                        False, # is_vision
+                        config_dict,
+                        True   # prefer_fast
+                    )
+                    segments = json.loads(response.text)
+                except Exception as e:
+                    print(f"[ReadingEngine] API Analysis failed, defaulting to normal reading: {e}")
+                    segments = [{"type": "normal", "text": text}]
             
             chunks = []
             speaker_voices = {}
@@ -102,11 +141,11 @@ class ReadingEngine:
                     if spk_lower in ["me", "self", "narrator", "author"]:
                         v = self.voice
                     else:
-                        if spk not in speaker_voices:
+                        if spk_lower not in speaker_voices:
                             v = available_voices.pop(0) if available_voices else "en-US-AriaNeural"
-                            speaker_voices[spk] = v
+                            speaker_voices[spk_lower] = v
                         else:
-                            v = speaker_voices[spk]
+                            v = speaker_voices[spk_lower]
                 else:
                     v = self.voice
                         

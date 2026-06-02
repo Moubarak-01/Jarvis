@@ -78,8 +78,10 @@ def generate_content_with_waterfall(
                     def __getattr__(self, name):
                         return getattr(self.original, name)
 
+                print(f"[LLM] \u2705 Successfully used model: {model_name}")
                 return CleanResponse("".join(text_parts), response)
             except Exception:
+                print(f"[LLM] \u2705 Successfully used model: {model_name} (Raw format)")
                 return response
 
         except Exception as e:
