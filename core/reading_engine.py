@@ -14,12 +14,12 @@ class ReadingEngine:
         self._current_task = None
         # Initialize pygame mixer only when needed to avoid locking audio devices
     
-    async def read_aloud(self, text: str):
+    async def read_aloud(self, text: str, voice_override: str = None):
         """Generates TTS audio and plays it in chunks."""
         
         # Dynamically fetch the current persona voice from memory
         memory = load_memory()
-        active_persona = memory.get("settings", {}).get("active_voice", {}).get("value", "Charon")
+        active_persona = voice_override if voice_override else memory.get("settings", {}).get("active_voice", {}).get("value", "Charon")
         
         # Map Gemini Personas to Edge-TTS Voices
         voice_map = {

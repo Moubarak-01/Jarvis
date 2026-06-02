@@ -17,7 +17,8 @@ def read_clipboard_action(parameters: dict, player=None, speak=None) -> str:
     if not text:
         return "The clipboard is empty or could not be read."
     
-    if len(text) >= 800:
+    force_long_text = parameters.get("voice") is not None
+    if force_long_text or len(text) >= 800:
         return f"[LONG_TEXT_PAYLOAD]\n{text}"
     
     # Just return the text to the model

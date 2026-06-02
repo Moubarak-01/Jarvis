@@ -522,10 +522,16 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "read_clipboard",
-        "description": "Reads the current contents of the system clipboard out loud. Use when user asks to read what they copied or cut.",
+        "description": "Reads the current contents of the system clipboard out loud. Use when user asks to read what they copied or cut. You can specify a preferred voice if the user asks for a specific gender/tone without explicitly requesting a global persona change.",
         "parameters": {
             "type": "OBJECT",
-            "properties": {}
+            "properties": {
+                "voice": {
+                    "type": "STRING",
+                    "description": "Optional. The persona/voice to use for reading (e.g., 'Charon' for deep male, 'Puck' for bright male, 'Aoede' for female). Use ONLY if the user explicitly asks to read in a specific voice.",
+                    "enum": ["Charon", "Puck", "Aoede", "Kore"]
+                }
+            }
         }
     },
     {
@@ -785,7 +791,7 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
         print("[JARVIS] 🛑 Manual interrupt triggered.")
 
-    async def _handle_long_text_reading(self, text: str):
+    async def _handle_long_text_reading(self, text: str, voice_override: str = None):
         """Option B: Try to use Dedicated Reading Engine. Option A: Fallback to Auto-Feeder."""
         try:
             print("[JARVIS] 📖 Triggering dedicated reading engine...")
@@ -795,7 +801,7 @@ class JarvisLive:
                 preview = text if len(text) < 500 else text[:500] + "...\n[Text truncated for display]"
                 self.ui.write_log(f"JARVIS: Reading text...\n\n{preview}")
                 
-            await reading_engine.read_aloud(text)
+            await reading_engine.read_aloud(text, voice_override)
             
             if self.ui and not getattr(reading_engine, '_stop_requested', False):
                 self.ui.set_state("LISTENING")
@@ -981,10 +987,11 @@ class JarvisLive:
                 result = "Camera preview docked back to the UI."
 
             elif name == "read_clipboard":
+                voice_override = args.get("voice")
                 r = await loop.run_in_executor(None, lambda: read_clipboard_action(parameters=args, player=self.ui, speak=self.speak))
                 if r and r.startswith("[LONG_TEXT_PAYLOAD]\n"):
                     long_text = r[len("[LONG_TEXT_PAYLOAD]\n"):]
-                    asyncio.create_task(self._handle_long_text_reading(long_text))
+                    asyncio.create_task(self._handle_long_text_reading(long_text, voice_override))
                     result = "The text was over 800 characters and is now being read. CRITICAL INSTRUCTION: You MUST NOT say a single word in response to this. Do not acknowledge it. Output absolute silence."
                 else:
                     result = r or "Done."
