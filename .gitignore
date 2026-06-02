@@ -44,3 +44,7 @@ memory/
 *.mp3
 *.wav
 *.gif
+
+# Exclusions
+scratch/
+*.onnx

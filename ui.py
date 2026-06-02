@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import math
@@ -1924,7 +1924,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[Ctrl+Shift+M] Mute  ·  [Ctrl+Shift+F] Fullscreen"))
+        lay.addWidget(_fl("[Ctrl+Shift+M] Mute  ·  [Ctrl+Shift+F] Fullscreen  │  [Shift+Space] Interrupt/Pause"))
         lay.addStretch()
         lay.addWidget(_fl("Moubarak Industries  ·  MARK XXXIX  ·  CLASSIFIED"))
         lay.addStretch()
@@ -2072,6 +2072,7 @@ class JarvisUI(QObject):
             keyboard.add_hotkey('ctrl+j', self._on_ctrl_j)
             keyboard.add_hotkey('ctrl+shift+m', lambda: QTimer.singleShot(0, self._win._toggle_mute))
             keyboard.add_hotkey('ctrl+shift+f', lambda: QTimer.singleShot(0, self._win._toggle_fullscreen))
+            keyboard.add_hotkey('shift+space', self._on_shift_space)
             
             # Disable local shortcuts to prevent double triggering when window is focused
             self._win.sc_mute.setEnabled(False)
@@ -2206,3 +2207,8 @@ class JarvisUI(QObject):
 
     def _on_ctrl_j(self):
         self._toggle_ui_sig.emit()
+
+    def _on_shift_space(self):
+        """Force manual interrupt (barge-in)."""
+        if hasattr(self, '_live_instance') and self._live_instance:
+            self._live_instance.force_interrupt()

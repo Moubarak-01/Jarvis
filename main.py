@@ -5,6 +5,7 @@ import json
 import sys
 import os
 import traceback
+import time
 from pathlib import Path
 
 # --- FIX: Resolve Qt DPI Awareness conflict and suppress warnings ---
@@ -48,6 +49,9 @@ from actions.github_handler    import github_processor
 from actions.timer             import timer_action
 from actions.clipboard_action  import read_clipboard_action
 from actions.system_status     import system_status
+from core.reading_engine       import reading_engine
+import onnxruntime as ort
+import numpy as np
 
 
 class ReconnectRequested(Exception):
@@ -68,6 +72,37 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+
+# --- SILERO VAD SETUP ---
+VAD_MODEL_PATH = BASE_DIR / "core" / "silero_vad.onnx"
+_vad_session = None
+_h = np.zeros((2, 1, 64)).astype('float32')
+_c = np.zeros((2, 1, 64)).astype('float32')
+_sr = np.array(16000, dtype=np.int64)
+
+if os.path.exists(VAD_MODEL_PATH):
+    _vad_session = ort.InferenceSession(str(VAD_MODEL_PATH), providers=['CPUExecutionProvider'])
+
+def _is_human_speaking(audio_bytes: bytes) -> bool:
+    global _h, _c
+    if not _vad_session:
+        return True # Fallback if model not found
+
+    audio_int16 = np.frombuffer(audio_bytes, np.int16)
+    audio_float32 = audio_int16.astype(np.float32) / 32768.0
+    
+    ort_inputs = {
+        'input': np.expand_dims(audio_float32, axis=0),
+        'sr': _sr,
+        'h': _h,
+        'c': _c
+    }
+    try:
+        out, _h, _c = _vad_session.run(None, ort_inputs)
+        return out[0][0] > 0.5
+    except Exception:
+        return True # Fallback on error
+# ------------------------
 
 def _get_api_key() -> str:
     key = get_gemini_key()
@@ -321,10 +356,21 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "voice_name": {"type": "STRING", "description": "The name of the voice: Charon | Aoede | Puck | Kore"}
+                "voice_name": {"type": "STRING", "description": "The name of the voice: Charon | Aoede | Puck | Kore"},
+                "follow_up_task": {"type": "STRING", "description": "If the user asked you to do something AFTER switching voices, summarize what they want you to do here so you don't forget it upon reconnecting."}
             },
             "required": ["voice_name"]
         }
+    },
+    {
+        "name": "stop_reading",
+        "description": "Permanently stops the dedicated reading engine.",
+        "parameters": { "type": "OBJECT", "properties": {} }
+    },
+    {
+        "name": "resume_reading",
+        "description": "Resumes the dedicated reading engine if it was paused.",
+        "parameters": { "type": "OBJECT", "properties": {} }
     },
     {
         "name": "agent_task",
@@ -642,6 +688,11 @@ class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
         self.ui._live_instance = self
+        # Silero VAD initialization fields
+        self._silero_vad = None
+        self._vad_model_path = None
+        
+        self._auto_feeder_queue = []
         self.session        = None
         self.audio_in_queue = None
         self.out_queue      = None
@@ -653,6 +704,8 @@ class JarvisLive:
         self.ui.on_speak        = self.speak
         self._turn_done_event: asyncio.Event | None = None
         self.session_history    = []
+        self._last_jarvis_speak = 0.0
+        self._ignore_audio_until= 0.0
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -669,10 +722,17 @@ class JarvisLive:
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
-        if value:
-            self.ui.set_state("SPEAKING")
-        elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            if value:
+                self._last_jarvis_speak = time.time()
+                
+        if self.ui:
+            if value:
+                self.ui.set_state("SPEAKING")
+            else:
+                # Do not revert to LISTENING if the dedicated reading engine is currently active
+                if not getattr(reading_engine, 'is_playing', False):
+                    if not self.ui.muted:
+                        self.ui.set_state("LISTENING")
 
     def request_reconnect(self):
         self._reconnect_requested = True
@@ -697,6 +757,67 @@ class JarvisLive:
         # Use only the first part of the preference if it contains 'or' (e.g. 'sir or the honored one' -> 'sir')
         short_addr = addr_pref.split(" or ")[0] if " or " in addr_pref else addr_pref
         self.speak(f"{short_addr.title()}, {tool_name} encountered an error. {short}")
+
+    def force_interrupt(self):
+        """Forcefully interrupt Jarvis (used for manual keyboard barge-in)."""
+        with self._speaking_lock:
+            self._is_speaking = False
+            
+        self._ignore_audio_until = time.time() + 0.8
+        
+        if self.audio_in_queue:
+            while not self.audio_in_queue.empty():
+                try:
+                    self.audio_in_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                    
+        # Pause reading engine if it's active
+        try:
+            if getattr(reading_engine, 'is_playing', False):
+                reading_engine.pause()
+        except NameError:
+            pass
+        except Exception:
+            pass
+            
+        if self.ui and not self.ui.muted:
+            self.ui.set_state("LISTENING")
+        print("[JARVIS] 🛑 Manual interrupt triggered.")
+
+    async def _handle_long_text_reading(self, text: str):
+        """Option B: Try to use Dedicated Reading Engine. Option A: Fallback to Auto-Feeder."""
+        try:
+            print("[JARVIS] 📖 Triggering dedicated reading engine...")
+            if self.ui:
+                self.ui.set_state("SPEAKING")
+                self.ui.write_log(f"JARVIS: Reading text...\\n\\n{text}")
+                
+            await reading_engine.read_aloud(text)
+            
+            if self.ui and not getattr(reading_engine, '_stop_requested', False):
+                self.ui.set_state("LISTENING")
+        except Exception as e:
+            print(f"[JARVIS] ⚠️ Dedicated reading engine failed ({e}). Falling back to Auto-Feeder.")
+            # Option A: Auto-Feeder
+            words = text.split()
+            chunk_size = 300
+            for i in range(0, len(words), chunk_size):
+                chunk = " ".join(words[i:i+chunk_size])
+                self._auto_feeder_queue.append(chunk)
+            
+            # Kick off the first chunk immediately
+            if self._auto_feeder_queue:
+                first_chunk = self._auto_feeder_queue.pop(0)
+                if not self._loop or not self.session: return
+                self.session_history.append(f"Auto-Feeder (Part 1): {first_chunk}")
+                asyncio.run_coroutine_threadsafe(
+                    self.session.send_client_content(
+                        turns={"parts": [{"text": f"Read Part 1: {first_chunk}"}]},
+                        turn_complete=True
+                    ),
+                    self._loop
+                )
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -723,6 +844,15 @@ class JarvisLive:
                 parts.append(f"\n[CRITICAL ADDRESSING RULE]\nYou must ONLY address the user as: {addr_pref}\n")
         
         parts.append(sys_prompt)
+
+        parts.append(
+            "\n[READING RULE: PREVENTING VOICE FATIGUE]\n"
+            "When the user asks you to read a long text, script, or article, your voice engine will sound fatigued, rushed, or 'gasp for air' if you try to read it as a normal continuous paragraph.\n"
+            "To prevent this, you MUST format your spoken response by injecting ellipses (...) every 10 to 15 words, and breaking the text into many short lines.\n"
+            "The ellipses (...) are critical: they force your voice engine to take a physical breath and pause.\n"
+            "Example: 'Here is the text... It starts by describing the scene... The sun is hot... and the players are tired...'\n"
+            "Even if you are quoting the user's text exactly, you MUST inject ellipses (...) throughout the quote to control your pacing. Never read a long sentence without breaking it up with ellipses. Maintain a slow, effortless, and highly paced rhythm without ever rushing.\n"
+        )
 
         parts.append("\n[DICTATION RULE]\nIf the user asks you to 'type this in for me' or dictate text, you MUST use the computer_control 'type' action. Normally, provide EXACTLY what the user said. However, if the user explicitly asks you to 'rewrite it professionally' or 'clean it up', you should remove filler words (like 'um', 'uh', 'like') and rewrite the text in a clean, polite, and professional manner before typing it. If they don't ask for a cleanup, just type the exact text requested.\n")
 
@@ -850,7 +980,12 @@ class JarvisLive:
 
             elif name == "read_clipboard":
                 r = await loop.run_in_executor(None, lambda: read_clipboard_action(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
+                if r and r.startswith("[LONG_TEXT_PAYLOAD]\n"):
+                    long_text = r[len("[LONG_TEXT_PAYLOAD]\n"):]
+                    asyncio.create_task(self._handle_long_text_reading(long_text))
+                    result = "The text was over 800 characters and is now being read. CRITICAL INSTRUCTION: You MUST NOT say a single word in response to this. Do not acknowledge it. Output absolute silence."
+                else:
+                    result = r or "Done."
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
@@ -877,8 +1012,19 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "persona_control":
+                # Extract the follow-up task so we can pass it to the next session
+                if args.get("follow_up_task"):
+                    self.deferred_task = args.get("follow_up_task")
                 r = await loop.run_in_executor(None, lambda: persona_control(parameters=args, player=self.ui))
                 result = r or "Done."
+
+            elif name == "stop_reading":
+                reading_engine.stop()
+                result = "Reading engine stopped."
+
+            elif name == "resume_reading":
+                reading_engine.resume()
+                result = "Reading engine resumed."
 
             elif name == "gmail_processor":
                 r = await loop.run_in_executor(None, lambda: gmail_processor(parameters=args, player=self.ui))
@@ -1000,11 +1146,35 @@ class JarvisLive:
             except asyncio.QueueFull:
                 pass  # drop chunk silently — mic produces faster than network consumes
 
+        self._last_user_speech = 0.0
+
         def callback(indata, frames, time_info, status):
+            if self.ui.muted:
+                return
+
+            if getattr(reading_engine, 'is_playing', False):
+                return # Ignore microphone completely while reading engine is active
+
+            data = indata.tobytes()
+            is_speech = _is_human_speaking(data)
+            
             with self._speaking_lock:
-                jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted:
-                data = indata.tobytes()
+                # Add a 1.0s tail delay to account for OS buffer and Bluetooth speaker latency
+                jarvis_speaking = self._is_speaking or (time.time() - self._last_jarvis_speak < 1.0)
+
+            # Option 3: Disable voice barge-in to permanently solve the echo loop.
+            # Only allow speech if Jarvis is definitely NOT speaking.
+            if jarvis_speaking:
+                is_speech = False
+
+            if is_speech:
+                self._last_user_speech = time.time()
+                # If we were stuck in THINKING, gently snap back to LISTENING to show we hear you
+                if getattr(self.ui, "_win", None) and getattr(self.ui._win, "_state_lbl", None):
+                    if self.ui._win._state_lbl.text() == "THINKING":
+                        loop.call_soon_threadsafe(self.ui.set_state, "LISTENING")
+
+                # Forward user's voice to Gemini
                 loop.call_soon_threadsafe(
                     _safe_enqueue,
                     self.out_queue,
@@ -1022,6 +1192,12 @@ class JarvisLive:
                 print("[JARVIS] 🎤 Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
+                    # Transition to THINKING state when user stops speaking for 0.8s
+                    if getattr(self, "_last_user_speech", 0) > 0:
+                        if time.time() - self._last_user_speech > 0.8:
+                            if not self._is_speaking and not getattr(reading_engine, 'is_playing', False):
+                                self.ui.set_state("THINKING")
+                            self._last_user_speech = 0
         except Exception as e:
             print(f"[JARVIS] ❌ Mic: {e}")
             raise
@@ -1035,6 +1211,8 @@ class JarvisLive:
                 async for response in self.session.receive():
 
                     if response.data:
+                        if time.time() < getattr(self, '_ignore_audio_until', 0):
+                            continue # Drop leftover audio after an interruption
                         if self._turn_done_event and self._turn_done_event.is_set():
                             self._turn_done_event.clear()
                         self.audio_in_queue.put_nowait(response.data)
@@ -1108,6 +1286,19 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                        
+                        # --- Auto-Feeder Progression ---
+                        if hasattr(self, '_auto_feeder_queue') and self._auto_feeder_queue:
+                            next_chunk = self._auto_feeder_queue.pop(0)
+                            if self._loop and self.session:
+                                self.session_history.append(f"Auto-Feeder (Next Part): {next_chunk}")
+                                asyncio.run_coroutine_threadsafe(
+                                    self.session.send_client_content(
+                                        turns={"parts": [{"text": f"Continue reading next part: {next_chunk}"}]},
+                                        turn_complete=True
+                                    ),
+                                    self._loop
+                                )
                     continue
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
@@ -1146,6 +1337,11 @@ class JarvisLive:
                     print("[JARVIS] ✅ Connected.")
                     self.ui.set_state("LISTENING")
                     self.ui.write_log("SYS: JARVIS online.")
+
+                    if getattr(self, "deferred_task", None):
+                        task_msg = f"[SYSTEM MSG: The user just switched your voice persona. They also asked: '{self.deferred_task}'. Please respond and fulfill this request using your new voice now.]"
+                        await self.session.send(input=task_msg)
+                        self.deferred_task = None
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
