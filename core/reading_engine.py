@@ -3,19 +3,71 @@ import os
 import tempfile
 import pygame
 import edge_tts
+import json
+from google import genai
+from google.genai import types
 from memory.memory_manager import load_memory
 
 class ReadingEngine:
-    """Dedicated offline TTS engine for reading extremely long texts."""
+    """Dedicated offline TTS engine for reading extremely long texts and dialogues."""
     
     def __init__(self, voice="en-US-ChristopherNeural"):
         self.voice = voice
         self.is_playing = False
         self._current_task = None
-        # Initialize pygame mixer only when needed to avoid locking audio devices
-    
+        # Extended voice pool for dialogues
+        self.voice_pool = [
+            "en-US-SteffanNeural", "en-US-JennyNeural", "en-GB-RyanNeural", 
+            "en-AU-NatashaNeural", "en-CA-LiamNeural", "en-IE-ConnorNeural",
+            "en-NZ-MitchellNeural", "en-ZA-LukeNeural", "en-US-AriaNeural",
+            "en-GB-SoniaNeural", "en-US-GuyNeural"
+        ]
+        
+    async def _analyze_text(self, text: str) -> dict:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return {"is_dialogue": False}
+        try:
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                "Analyze the following text to determine if it is a dialogue/script with multiple speakers, "
+                "or just a normal article/text block. If it is a dialogue, extract the segments in order. "
+                "If it's an article but has quotes, treat it as normal (is_dialogue: false) unless it is distinctly formatted as a script.\n\n"
+                f"TEXT:\n{text[:5000]}"
+            )
+            
+            response = await client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema={
+                        "type": "OBJECT",
+                        "properties": {
+                            "is_dialogue": {"type": "BOOLEAN"},
+                            "segments": {
+                                "type": "ARRAY",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "speaker": {"type": "STRING"},
+                                        "text": {"type": "STRING"}
+                                    },
+                                    "required": ["speaker", "text"]
+                                }
+                            }
+                        },
+                        "required": ["is_dialogue"]
+                    }
+                )
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            print(f"[ReadingEngine] AI Analysis failed: {e}")
+            return {"is_dialogue": False}
+            
     async def read_aloud(self, text: str, voice_override: str = None):
-        """Generates TTS audio and plays it in chunks."""
+        """Generates TTS audio and plays it in chunks, supporting dialogues."""
         
         # Dynamically fetch the current persona voice from memory
         memory = load_memory()
@@ -37,24 +89,59 @@ class ReadingEngine:
         try:
             import re
             
-            # 1. Clean Markdown
-            # Remove link syntax: [text](url) -> text
-            clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-            # Remove common formatting symbols
-            clean_text = re.sub(r'[*_#>`~-]', '', clean_text)
+            # Analyze text to see if it's a dialogue
+            analysis = await self._analyze_text(text)
+            is_dialogue = analysis.get("is_dialogue", False)
             
-            # 2. Chunk the text into smaller pieces to avoid edge-tts API limits and long delays
-            sentences = re.split(r'(?<=[.!?\n])\s+', clean_text)
             chunks = []
-            current_chunk = ""
-            for sentence in sentences:
-                if len(current_chunk) + len(sentence) < 2000:
-                    current_chunk += sentence + " "
-                else:
-                    if current_chunk: chunks.append(current_chunk.strip())
-                    current_chunk = sentence + " "
-            if current_chunk:
-                chunks.append(current_chunk.strip())
+            
+            if is_dialogue and "segments" in analysis and analysis["segments"]:
+                print("[ReadingEngine] Dialogue detected! Assigning voices...")
+                speaker_voices = {}
+                available_voices = self.voice_pool.copy()
+                
+                for seg in analysis["segments"]:
+                    spk = seg["speaker"]
+                    txt = seg["text"]
+                    spk_lower = spk.lower().strip()
+                    
+                    # Assign narrator/user to default voice
+                    if spk_lower in ["me", "self", "narrator", "author"]:
+                        v = self.voice
+                    else:
+                        if spk not in speaker_voices:
+                            v = available_voices.pop(0) if available_voices else "en-US-AriaNeural"
+                            speaker_voices[spk] = v
+                        else:
+                            v = speaker_voices[spk]
+                            
+                    # Chunk the segment text
+                    clean_txt = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', txt)
+                    clean_txt = re.sub(r'[*_#>`~-]', '', clean_txt)
+                    sentences = re.split(r'(?<=[.!?\n])\s+', clean_txt)
+                    current_chunk = ""
+                    for sentence in sentences:
+                        if len(current_chunk) + len(sentence) < 2000:
+                            current_chunk += sentence + " "
+                        else:
+                            if current_chunk: chunks.append({"voice": v, "text": current_chunk.strip()})
+                            current_chunk = sentence + " "
+                    if current_chunk:
+                        chunks.append({"voice": v, "text": current_chunk.strip()})
+            else:
+                # Normal reading
+                clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+                clean_text = re.sub(r'[*_#>`~-]', '', clean_text)
+                sentences = re.split(r'(?<=[.!?\n])\s+', clean_text)
+                current_chunk = ""
+                for sentence in sentences:
+                    if len(current_chunk) + len(sentence) < 2000:
+                        current_chunk += sentence + " "
+                    else:
+                        if current_chunk: chunks.append({"voice": self.voice, "text": current_chunk.strip()})
+                        current_chunk = sentence + " "
+                if current_chunk:
+                    chunks.append({"voice": self.voice, "text": current_chunk.strip()})
 
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
@@ -62,7 +149,7 @@ class ReadingEngine:
             audio_queue = asyncio.Queue()
 
             async def generate_chunks():
-                for i, chunk in enumerate(chunks):
+                for i, chunk_data in enumerate(chunks):
                     if self._stop_requested:
                         break
                     
@@ -70,11 +157,14 @@ class ReadingEngine:
                     temp_filename = temp_file.name
                     temp_file.close()
                     
+                    chunk_text = chunk_data["text"]
+                    chunk_voice = chunk_data["voice"]
+                    
                     # Retry logic for network/API limits
                     success = False
                     for attempt in range(3):
                         try:
-                            communicate = edge_tts.Communicate(chunk, self.voice, rate='+10%')
+                            communicate = edge_tts.Communicate(chunk_text, chunk_voice, rate='+10%')
                             await communicate.save(temp_filename)
                             success = True
                             break
