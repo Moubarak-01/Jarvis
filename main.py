@@ -791,7 +791,9 @@ class JarvisLive:
             print("[JARVIS] 📖 Triggering dedicated reading engine...")
             if self.ui:
                 self.ui.set_state("SPEAKING")
-                self.ui.write_log(f"JARVIS: Reading text...\\n\\n{text}")
+                # Truncate text to avoid freezing the UI and flooding the activity log
+                preview = text if len(text) < 500 else text[:500] + "...\n[Text truncated for display]"
+                self.ui.write_log(f"JARVIS: Reading text...\n\n{preview}")
                 
             await reading_engine.read_aloud(text)
             
@@ -1152,8 +1154,8 @@ class JarvisLive:
             if self.ui.muted:
                 return
 
-            if getattr(reading_engine, 'is_playing', False):
-                return # Ignore microphone completely while reading engine is active
+            if getattr(reading_engine, 'is_playing', False) and not getattr(reading_engine, 'is_paused', False):
+                return # Ignore microphone completely while reading engine is actively playing
 
             data = indata.tobytes()
             is_speech = _is_human_speaking(data)
