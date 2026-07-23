@@ -1,0 +1,970 @@
+diff --git a/ui.py b/ui.py
+index 1f2286e..c7b8ff1 100644
+--- a/ui.py
++++ b/ui.py
+@@ -1,4 +1,4 @@
+-from __future__ import annotations
++﻿from __future__ import annotations
+ 
+ import json
+ import math
+@@ -8,6 +8,7 @@ import random
+ import subprocess
+ import sys
+ import threading
++from threading import Lock
+ import time
+ from pathlib import Path
+ 
+@@ -15,7 +16,7 @@ import psutil
+ 
+ from PyQt6.QtCore import (
+     QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
+-    QTimer, QUrl, pyqtSignal,
++    QTimer, QUrl, pyqtSignal, QThread
+ )
+ from PyQt6.QtGui import (
+     QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QFontDatabase,
+@@ -24,9 +25,12 @@ from PyQt6.QtGui import (
+ )
+ from PyQt6.QtWidgets import (
+     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
+-    QVBoxLayout, QWidget, QProgressBar,
++    QMainWindow, QMenu, QPushButton, QScrollArea, QSizePolicy,
++    QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QStackedWidget,
+ )
++from PyQt6.QtGui import QAction, QIcon
++import cv2
++from PyQt6.QtGui import QImage
+ 
+ def _base_dir() -> Path:
+     if getattr(sys, "frozen", False):
+@@ -35,7 +39,8 @@ def _base_dir() -> Path:
+ 
+ BASE_DIR   = _base_dir()
+ CONFIG_DIR = BASE_DIR / "config"
+-API_FILE   = CONFIG_DIR / "api_keys.json"
++ICON_PATH  = BASE_DIR / "Jarvis_Icon-removebg-preview.png"
++# API_FILE removed in favor of .env
+ 
+ _DEFAULT_W, _DEFAULT_H = 980, 700
+ _MIN_W,     _MIN_H     = 820, 580
+@@ -554,6 +559,208 @@ class MetricBar(QWidget):
+         p.setPen(QPen(bar_col if self._text != "--" else qcol(C.TEXT_DIM), 1))
+         p.drawText(QRectF(0, 4, W - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._text)
+ 
++class CameraWidget(QWidget):
++    frame_ready = pyqtSignal(QImage)
++    frame_ready_rgb = pyqtSignal(object)
++    double_clicked = pyqtSignal()
++
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self._w = _LEFT_W - 16
++        self._h = int(self._w * 0.75)
++        self.setFixedSize(self._w, self._h)
++
++        self.layout = QVBoxLayout(self)
++        self.layout.setContentsMargins(0, 0, 0, 0)
++        
++        self.label = QLabel("CAMERA OFF")
++        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        self.label.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
++        self.label.setStyleSheet(f"""
++            color: {C.TEXT_DIM}; 
++            background: {C.PANEL}; 
++            border: 1px solid {C.BORDER}; 
++            border-radius: 4px;
++        """)
++        self.layout.addWidget(self.label)
++        
++        self.cap = None
++        self.timer = QTimer(self)
++        self.timer.timeout.connect(self.update_frame)
++        self.latest_frame = None
++        self._frame_lock = Lock()
++
++    def mouseDoubleClickEvent(self, event):
++        self.double_clicked.emit()
++        super().mouseDoubleClickEvent(event)
++
++    def mousePressEvent(self, event):
++        if event.button() == Qt.MouseButton.LeftButton:
++            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
++            event.accept()
++        else:
++            super().mousePressEvent(event)
++
++    def mouseMoveEvent(self, event):
++        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, '_drag_pos') and self._drag_pos is not None:
++            if not self.isWindow():
++                # Save original layout info before removing
++                self.original_layout = self.parentWidget().layout() if self.parentWidget() else None
++                # Make it a floating tool window when dragged out of layout
++                self.setParent(None)
++                self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
++                self.show()
++            self.move(event.globalPosition().toPoint() - self._drag_pos)
++            event.accept()
++        else:
++            super().mouseMoveEvent(event)
++
++    def mouseReleaseEvent(self, event):
++        # No auto-dock — only voice command can dock the preview back
++        super().mouseReleaseEvent(event)
++
++    def dock(self):
++        if self.isWindow() and hasattr(self, 'original_layout') and self.original_layout is not None:
++            self.setParent(self.original_layout.parentWidget())
++            self.setWindowFlags(Qt.WindowType.Widget)
++            # Insert before btn_virtual_control (which is usually the widget right after camera preview)
++            # Or just add to layout
++            self.original_layout.insertWidget(self.original_layout.count() - 2, self)
++            self.show()
++
++    def start(self):
++        if self.cap is None:
++            self.cap = cv2.VideoCapture(0)
++        self.timer.start(50) # 20 FPS
++        self.label.setText("INITIALIZING...")
++
++    def stop(self):
++        self.timer.stop()
++        if self.cap:
++            self.cap.release()
++            self.cap = None
++        self.label.setText("CAMERA OFF")
++        self.label.setPixmap(QPixmap())
++
++    def update_frame(self):
++        if self.cap and self.cap.isOpened():
++            ret, frame = self.cap.read()
++            if ret:
++                frame = cv2.flip(frame, 1)
++                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
++                h, w, ch = rgb.shape
++                bytes_per_line = ch * w
++                q_img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
++                pix = QPixmap.fromImage(q_img).scaled(
++                    self._w, self._h, 
++                    Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
++                    Qt.TransformationMode.SmoothTransformation
++                )
++                if getattr(self, 'is_tracking', False):
++                    # Do not set pixmap here if we are tracking (worker will provide annotated frame)
++                    pass
++                else:
++                    self.label.setPixmap(pix)
++
++                self.frame_ready.emit(q_img)
++                self.frame_ready_rgb.emit(rgb)
++                
++                with self._frame_lock:
++                    self.latest_frame = frame
++
++    def set_annotated_frame(self, q_img: QImage):
++        if getattr(self, 'is_tracking', False):
++            pix = QPixmap.fromImage(q_img).scaled(
++                self._w, self._h, 
++                Qt.AspectRatioMode.KeepAspectRatioByExpanding, 
++                Qt.TransformationMode.SmoothTransformation
++            )
++            self.label.setPixmap(pix)
++
++class LargeCameraWidget(QWidget):
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.layout = QVBoxLayout(self)
++        self.layout.setContentsMargins(0, 0, 0, 0)
++        self.label = QLabel("CAMERA OFF")
++        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        self.label.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
++        self.label.setStyleSheet(f"color: {C.PRI}; background: transparent;")
++        self.layout.addWidget(self.label)
++
++    def update_frame(self, q_img: QImage):
++        pix = QPixmap.fromImage(q_img).scaled(
++            self.width(), self.height(),
++            Qt.AspectRatioMode.KeepAspectRatio,
++            Qt.TransformationMode.SmoothTransformation
++        )
++        self.label.setPixmap(pix)
++
++class HandTrackingWorker(QThread):
++    annotated_frame_ready = pyqtSignal(QImage)
++
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.active = False
++        self._lock = Lock()
++        self.current_frame = None
++        self.running = True
++        
++        # We will import HandTracker dynamically to avoid slowing down startup if mediapipe is heavy
++        self.tracker = None
++
++    def set_active(self, state: bool):
++        self.active = state
++        if not state and self.tracker is not None:
++            # Maybe reset clicking state
++            pass
++
++    def update_frame(self, frame):
++        if not self.active:
++            return
++        with self._lock:
++            self.current_frame = frame
++
++    def run(self):
++        while self.running:
++            frame_to_process = None
++            with self._lock:
++                if self.current_frame is not None:
++                    frame_to_process = self.current_frame.copy()
++                    self.current_frame = None
++            
++            if frame_to_process is not None and self.active:
++                if self.tracker is None:
++                    try:
++                        from core.hand_tracker import HandTracker
++                        self.tracker = HandTracker()
++                    except Exception as e:
++                        print(f"[HandTracking] Error loading module: {e}")
++                        self.active = False
++                        continue
++                
++                try:
++                    res_frame = self.tracker.process_frame(frame_to_process)
++                    if res_frame is not None:
++                        h, w, ch = res_frame.shape
++                        bytes_per_line = ch * w
++                        q_img = QImage(res_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
++                        self.annotated_frame_ready.emit(q_img)
++                except Exception as e:
++                    pass
++            
++            time.sleep(0.01) # ~100 FPS loop checking for frames
++
++    def stop(self):
++        self.running = False
++        self.wait()
++        if self.tracker is not None:
++            try:
++                self.tracker.close()
++            except:
++                pass
++
++
+ class LogWidget(QTextEdit):
+     _sig = pyqtSignal(str)
+ 
+@@ -810,11 +1017,19 @@ class _DropCanvas(QWidget):
+         p.drawText(QRectF(0, cy + 12, W, 16), Qt.AlignmentFlag.AlignCenter, "Release to load")
+ 
+     def _paint_file(self, p, W, H):
+-        path = Path(self._z._current_file)
+-        cat  = _file_category(path)
+-        icon, icon_col = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
+-        size_str = _fmt_size(path.stat().st_size)
+-        ext_str  = path.suffix.upper().lstrip(".") or "FILE"
++        try:
++            path = Path(self._z._current_file)
++            if not path.exists():
++                self._paint_idle(p, W, H, False)
++                return
++            
++            cat  = _file_category(path)
++            icon, icon_col = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
++            size_str = _fmt_size(path.stat().st_size)
++            ext_str  = path.suffix.upper().lstrip(".") or "FILE"
++        except Exception:
++            self._paint_idle(p, W, H, False)
++            return
+ 
+         block_x, block_w = 10, 60
+         p.setFont(QFont("Segoe UI Emoji", 22) if _OS == "Windows" else QFont("Arial", 22))
+@@ -984,6 +1199,94 @@ class SetupOverlay(QWidget):
+         self.done.emit(key, self._sel_os)
+ 
+ 
++class TimerWidget(QWidget):
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.setStyleSheet(f"background-color: {C.BG};")
++        
++        layout = QVBoxLayout(self)
++        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        
++        self.time_label = QLabel("00:00")
++        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        self.time_label.setFont(QFont("Segoe UI", 84, QFont.Weight.Bold))
++        self.time_label.setStyleSheet(f"color: {C.ACC};")
++        layout.addWidget(self.time_label)
++        
++        layout.addSpacing(30)
++        
++        btn_layout = QHBoxLayout()
++        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        
++        self.cancel_btn = QPushButton("Cancel Timer")
++        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.cancel_btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
++        self.cancel_btn.setStyleSheet(f"""
++            QPushButton {{
++                background-color: {C.DARK};
++                color: {C.TEXT};
++                border: 1px solid {C.BORDER};
++                border-radius: 6px;
++                padding: 10px 30px;
++            }}
++            QPushButton:hover {{
++                border-color: {C.ACC};
++                color: {C.ACC};
++            }}
++            QPushButton:pressed {{
++                background-color: {C.BORDER};
++            }}
++        """)
++        btn_layout.addWidget(self.cancel_btn)
++        
++        layout.addLayout(btn_layout)
++
++    def set_time(self, mins: int, secs: int):
++        self.time_label.setText(f"{mins:02d}:{secs:02d}")
++
++class FloatingTimerWidget(QWidget):
++    def __init__(self):
++        super().__init__()
++        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
++        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
++        
++        self.layout = QVBoxLayout(self)
++        self.layout.setContentsMargins(10, 10, 10, 10)
++        
++        self.frame = QFrame()
++        self.frame.setStyleSheet(f"""
++            QFrame {{
++                background-color: {C.DARK};
++                border: 2px solid {C.PRI};
++                border-radius: 12px;
++            }}
++        """)
++        self.frame_layout = QVBoxLayout(self.frame)
++        self.frame_layout.setContentsMargins(20, 10, 20, 10)
++        
++        self.time_label = QLabel("00:00")
++        self.time_label.setFont(QFont("Segoe UI", 36, QFont.Weight.Bold))
++        self.time_label.setStyleSheet(f"color: {C.ACC}; border: none; background: transparent;")
++        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        self.frame_layout.addWidget(self.time_label)
++        
++        self.layout.addWidget(self.frame)
++        
++        self._drag_pos = None
++
++    def set_time(self, mins: int, secs: int):
++        self.time_label.setText(f"{mins:02d}:{secs:02d}")
++
++    def mousePressEvent(self, event):
++        if event.button() == Qt.MouseButton.LeftButton:
++            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
++            event.accept()
++
++    def mouseMoveEvent(self, event):
++        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
++            self.move(event.globalPosition().toPoint() - self._drag_pos)
++            event.accept()
++
+ class MainWindow(QMainWindow):
+     _log_sig   = pyqtSignal(str)
+     _state_sig = pyqtSignal(str)
+@@ -994,6 +1297,17 @@ class MainWindow(QMainWindow):
+         self.setMinimumSize(_MIN_W, _MIN_H)
+         self.resize(_DEFAULT_W, _DEFAULT_H)
+ 
++        # ── App Icon ───────────────────────────────────────────
++        if ICON_PATH.exists():
++            app_icon = QIcon(str(ICON_PATH))
++            self.setWindowIcon(app_icon)
++            QApplication.instance().setWindowIcon(app_icon)
++
++            # Windows taskbar icon fix (prevents Python logo from showing)
++            if platform.system() == "Windows":
++                import ctypes
++                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Jarvis.MarkXXXIX.Assistant")
++
+         screen = QApplication.primaryScreen().availableGeometry()
+         self.move(
+             (screen.width()  - _DEFAULT_W) // 2,
+@@ -1022,13 +1336,37 @@ class MainWindow(QMainWindow):
+ 
+         self.hud = HudCanvas(face_path)
+         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+-        body.addWidget(self.hud, stretch=5)
++        
++        self.timer_widget = TimerWidget()
++        self.timer_widget.cancel_btn.clicked.connect(self.cancel_timer)
++
++        self.large_camera = LargeCameraWidget()
++
++        self.center_stack = QStackedWidget()
++        self.center_stack.addWidget(self.hud)
++        self.center_stack.addWidget(self.timer_widget)
++        self.center_stack.addWidget(self.large_camera)
++
++        body.addWidget(self.center_stack, stretch=5)
+ 
+         self._right_panel = self._build_right_panel()
+         body.addWidget(self._right_panel, stretch=0)
+ 
++        # Connect camera signals
++        self.camera_preview.frame_ready.connect(self.large_camera.update_frame)
++        self.camera_preview.double_clicked.connect(self._toggle_to_camera)
++        
++        # Virtual Hand Control
++        self.hand_worker = HandTrackingWorker(self)
++        self.hand_worker.annotated_frame_ready.connect(self.camera_preview.set_annotated_frame)
++        self.hand_worker.start()
++        self.camera_preview.frame_ready_rgb.connect(self.hand_worker.update_frame)
++
+         root.addLayout(body, stretch=1)
+         root.addWidget(self._build_footer())
++        
++        self.floating_timer = FloatingTimerWidget()
++        self.floating_timer.hide()
+ 
+         self._clock_tmr = QTimer(self)
+         self._clock_tmr.timeout.connect(self._tick_clock)
+@@ -1049,17 +1387,137 @@ class MainWindow(QMainWindow):
+         if not self._ready:
+             self._show_setup()
+ 
+-        sc_mute = QShortcut(QKeySequence("F4"), self)
+-        sc_mute.activated.connect(self._toggle_mute)
+-        sc_full = QShortcut(QKeySequence("F11"), self)
+-        sc_full.activated.connect(self._toggle_fullscreen)
++        self.sc_mute = QShortcut(QKeySequence("Ctrl+Shift+M"), self)
++        self.sc_mute.activated.connect(self._toggle_mute)
++        self.sc_full = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
++        self.sc_full.activated.connect(self._toggle_fullscreen)
++
++        # ── System Tray ──────────────────────────────────────
++        self._quit_from_tray = False
++        self._tray = QSystemTrayIcon(self)
++        self._tray.setToolTip("J.A.R.V.I.S — MARK XXXIX")
++        self._tray_icons = self._create_tray_icons()
++        self._tray.setIcon(self._tray_icons["listening"])
++        self._tray.activated.connect(self._on_tray_activated)
++
++        tray_menu = QMenu()
++        tray_menu.setStyleSheet(f"""
++            QMenu {{ background: {C.PANEL}; color: {C.TEXT}; border: 1px solid {C.BORDER}; padding: 4px; }}
++            QMenu::item {{ padding: 6px 20px; }}
++            QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
++        """)
++        act_show = QAction("Show / Hide", self)
++        act_show.triggered.connect(self._tray_toggle_visible)
++        tray_menu.addAction(act_show)
++
++        act_mute = QAction("Toggle Mute", self)
++        act_mute.triggered.connect(self._toggle_mute)
++        tray_menu.addAction(act_mute)
++
++        tray_menu.addSeparator()
++        act_quit = QAction("Quit JARVIS", self)
++        act_quit.triggered.connect(self._tray_quit)
++        tray_menu.addAction(act_quit)
++
++        self._tray.setContextMenu(tray_menu)
++        self._tray.show()
+ 
+     def _toggle_fullscreen(self):
++        import time
++        if hasattr(self, '_last_fs_t') and time.time() - self._last_fs_t < 0.2:
++            return
++        self._last_fs_t = time.time()
++        
+         if self.isFullScreen():
+             self.showNormal()
+         else:
+             self.showFullScreen()
+ 
++    # ── System Tray Methods ──────────────────────────────
++    def _create_tray_icons(self) -> dict:
++        """Generate tray icons using the custom Jarvis icon with a colored status dot."""
++        icons = {}
++        state_colors = {
++            "listening": C.PRI,      # cyan
++            "thinking":  C.ACC2,     # yellow/orange
++            "speaking":  C.ACC,      # orange
++            "muted":     C.RED,      # red
++        }
++
++        # Load the custom icon as the base
++        base = QPixmap(str(ICON_PATH)) if ICON_PATH.exists() else QPixmap()
++        has_base = not base.isNull()
++
++        for key, color_hex in state_colors.items():
++            if has_base:
++                px = base.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
++                                 Qt.TransformationMode.SmoothTransformation)
++                # Pure icon as requested
++            else:
++                # Fallback: plain colored circle
++                px = QPixmap(64, 64)
++                px.fill(QColor(0, 0, 0, 0))
++                painter = QPainter(px)
++                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++                painter.setBrush(QBrush(QColor(color_hex)))
++                painter.setPen(Qt.PenStyle.NoPen)
++                painter.drawEllipse(4, 4, 56, 56)
++                painter.end()
++            icons[key] = QIcon(px)
++        return icons
++
++    def _update_tray_icon(self, state: str):
++        """Update tray icon color based on current state."""
++        if self._muted:
++            key = "muted"
++        elif state.upper() in ("THINKING", "PROCESSING"):
++            key = "thinking"
++        elif state.upper() == "SPEAKING":
++            key = "speaking"
++        else:
++            key = "listening"
++        self._tray.setIcon(self._tray_icons.get(key, self._tray_icons["listening"]))
++
++    def _on_tray_activated(self, reason):
++        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
++            self._tray_toggle_visible()
++
++    def _tray_toggle_visible(self):
++        if self.isVisible() and not self.isMinimized():
++            self.showMinimized()
++        else:
++            self.showNormal()
++            self.activateWindow()
++            self.raise_()
++
++    def _tray_quit(self):
++        self._quit_from_tray = True
++        self._tray.hide()
++        QApplication.instance().quit()
++
++    def closeEvent(self, event):
++        """Minimize to tray instead of quitting."""
++        if not self._quit_from_tray:
++            event.ignore()
++            self.hide()
++            self._tray.showMessage(
++                "JARVIS",
++                "Running in background. Double-click the tray icon to restore.",
++                QSystemTrayIcon.MessageIcon.Information,
++                2000,
++            )
++        else:
++            self._tray.hide()
++            event.accept()
++
++    def notify(self, title: str, message: str, duration: int = 3000):
++        """Show a Windows toast notification from the system tray."""
++        self._tray.showMessage(
++            title, message,
++            QSystemTrayIcon.MessageIcon.Information,
++            duration,
++        )
++
+     def resizeEvent(self, event):
+         super().resizeEvent(event)
+         if self._overlay and self._overlay.isVisible():
+@@ -1144,6 +1602,9 @@ class MainWindow(QMainWindow):
+         title.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
+         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+         mid.addWidget(title)
++        
++        self._timer_end_time = 0.0
++
+         sub = QLabel("Just A Rather Very Intelligent System")
+         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+         sub.setFont(QFont("Courier New", 7))
+@@ -1169,6 +1630,78 @@ class MainWindow(QMainWindow):
+     def _tick_clock(self):
+         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
+         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
++        
++        if self._timer_end_time > 0:
++            rem = self._timer_end_time - time.time()
++            if rem > 0:
++                mins, secs = divmod(int(rem), 60)
++                self.timer_widget.set_time(mins, secs)
++                self.floating_timer.set_time(mins, secs)
++            else:
++                self.cancel_timer()
++
++    def start_timer_countdown(self, duration_sec: float, message: str):
++        self._timer_end_time = time.time() + duration_sec
++        mins, secs = divmod(int(duration_sec), 60)
++        self.timer_widget.set_time(mins, secs)
++        self.floating_timer.set_time(mins, secs)
++        self.toggle_view_btn.show()
++        
++        # Position floating timer near the top right of the screen
++        screen_geo = QApplication.primaryScreen().availableGeometry()
++        fw, fh = self.floating_timer.sizeHint().width(), self.floating_timer.sizeHint().height()
++        self.floating_timer.move(screen_geo.width() - fw - 50, 50)
++        self.floating_timer.show()
++
++    def cancel_timer(self):
++        self._timer_end_time = 0.0
++        self.center_stack.setCurrentWidget(self.hud)
++        self.floating_timer.hide()
++        if not (self.camera_preview.cap and self.camera_preview.cap.isOpened()):
++            self.toggle_view_btn.hide()
++
++    def toggle_virtual_control(self, state=None):
++        if state is None:
++            # Called from button click
++            state = self.btn_virtual_control.isChecked()
++        else:
++            # Called from tool
++            self.btn_virtual_control.setChecked(state)
++
++        if state:
++            self.btn_virtual_control.setText("VIRTUAL CONTROL: ON")
++            self.camera_preview.is_tracking = True
++            self.hand_worker.set_active(True)
++        else:
++            self.btn_virtual_control.setText("VIRTUAL CONTROL: OFF")
++            self.camera_preview.is_tracking = False
++            self.hand_worker.set_active(False)
++
++    def _toggle_to_camera(self):
++        if self.camera_preview.cap and self.camera_preview.cap.isOpened():
++            self.center_stack.setCurrentWidget(self.large_camera)
++            self.toggle_view_btn.show()
++
++    def toggle_center_view(self):
++        current = self.center_stack.currentWidget()
++        
++        # Determine valid views
++        views = [self.hud]
++        if self._timer_end_time > 0:
++            views.append(self.timer_widget)
++        if self.camera_preview.cap and self.camera_preview.cap.isOpened():
++            views.append(self.large_camera)
++            
++        if not views:
++            return
++            
++        try:
++            idx = views.index(current)
++            next_idx = (idx + 1) % len(views)
++        except ValueError:
++            next_idx = 0
++            
++        self.center_stack.setCurrentWidget(views[next_idx])
+ 
+     def _build_left_panel(self) -> QWidget:
+         w = QWidget()
+@@ -1191,12 +1724,37 @@ class MainWindow(QMainWindow):
+         self._bar_gpu = MetricBar("GPU", C.ACC)
+         self._bar_tmp = MetricBar("TMP", "#ff6688")
+ 
++        self._bar_gpu.hide()
++        self._bar_tmp.hide()
++
+         for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
+                     self._bar_gpu, self._bar_tmp]:
+             lay.addWidget(bar)
+ 
+         lay.addSpacing(4)
+ 
++        self.camera_preview = CameraWidget()
++        self.camera_preview.hide()
++        lay.addWidget(self.camera_preview)
++        
++        self.btn_virtual_control = QPushButton("VIRTUAL CONTROL: OFF")
++        self.btn_virtual_control.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
++        self.btn_virtual_control.setStyleSheet(f"""
++            QPushButton {{
++                color: {C.TEXT_DIM}; background: {C.PANEL}; 
++                border: 1px solid {C.BORDER}; border-radius: 4px; padding: 4px;
++            }}
++            QPushButton:checked {{
++                color: {C.GREEN}; border: 1px solid {C.GREEN};
++            }}
++        """)
++        self.btn_virtual_control.setCheckable(True)
++        self.btn_virtual_control.hide()
++        self.btn_virtual_control.clicked.connect(self.toggle_virtual_control)
++        lay.addWidget(self.btn_virtual_control)
++
++        lay.addSpacing(4)
++
+         info_panel = QWidget()
+         info_panel.setStyleSheet(
+             f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+@@ -1237,6 +1795,25 @@ class MainWindow(QMainWindow):
+                 f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
+             )
+             lay.addWidget(lbl)
++            
++        self.toggle_view_btn = QPushButton("TOGGLE VIEW")
++        self.toggle_view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.toggle_view_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
++        self.toggle_view_btn.setStyleSheet(f"""
++            QPushButton {{
++                color: {C.ACC};
++                background: {C.DARK};
++                border: 1px solid {C.BORDER_A};
++                border-radius: 3px;
++                padding: 4px;
++            }}
++            QPushButton:hover {{
++                border-color: {C.ACC};
++            }}
++        """)
++        self.toggle_view_btn.clicked.connect(self.toggle_center_view)
++        self.toggle_view_btn.hide()
++        lay.addWidget(self.toggle_view_btn)
+ 
+         return w
+     def _build_right_panel(self) -> QWidget:
+@@ -1287,7 +1864,7 @@ class MainWindow(QMainWindow):
+         self._style_mute_btn()
+         lay.addWidget(self._mute_btn)
+ 
+-        fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
++        fs_btn = QPushButton("⛶  FULLSCREEN  [Ctrl+Shift+F]")
+         fs_btn.setFixedHeight(26)
+         fs_btn.setFont(QFont("Courier New", 7))
+         fs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+@@ -1347,16 +1924,16 @@ class MainWindow(QMainWindow):
+             l.setStyleSheet(f"color: {color}; background: transparent;")
+             return l
+ 
+-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
++        lay.addWidget(_fl("[Ctrl+Shift+M] Mute  ·  [Ctrl+Shift+F] Fullscreen  │  [Shift+Space] Interrupt/Pause"))
+         lay.addStretch()
+-        lay.addWidget(_fl("FatihMakes Industries  ·  MARK XXXIX  ·  CLASSIFIED"))
++        lay.addWidget(_fl("Moubarak Industries  ·  MARK XXXIX  ·  CLASSIFIED"))
+         lay.addStretch()
+-        lay.addWidget(_fl("© FATIHMAKES", C.PRI_DIM))
++        lay.addWidget(_fl("© MOUBARAK (Inspired by FatihMakes)", C.PRI_DIM))
+         return w
+ 
+     def _on_file_selected(self, path: str):
+-        self._current_file = path
+-        p    = Path(path)
++        self._current_file = str(Path(path).absolute())
++        p    = Path(self._current_file)
+         cat  = _file_category(p)
+         icon, _ = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
+         size = _fmt_size(p.stat().st_size)
+@@ -1372,6 +1949,11 @@ class MainWindow(QMainWindow):
+             threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
+ 
+     def _toggle_mute(self):
++        import time
++        if hasattr(self, '_last_mute_t') and time.time() - self._last_mute_t < 0.2:
++            return
++        self._last_mute_t = time.time()
++        
+         self._muted = not self._muted
+         self.hud.muted = self._muted
+         self._style_mute_btn()
+@@ -1412,14 +1994,15 @@ class MainWindow(QMainWindow):
+     def _apply_state(self, state: str):
+         self.hud.state    = state
+         self.hud.speaking = (state == "SPEAKING")
++        # Update tray icon color to match state
++        if hasattr(self, '_tray'):
++            self._update_tray_icon(state)
+ 
+     def _check_config(self) -> bool:
+-        if not API_FILE.exists(): return False
+-        try:
+-            d = json.loads(API_FILE.read_text(encoding="utf-8"))
+-            return bool(d.get("gemini_api_key")) and bool(d.get("os_system"))
+-        except Exception:
+-            return False
++        # Check environment variables
++        key = os.getenv("GEMINI_API_KEY")
++        # os_system is optional here as it has a default in config/__init__.py
++        return bool(key and len(key) > 15)
+ 
+     def _show_setup(self):
+         ov = SetupOverlay(self.centralWidget())
+@@ -1435,11 +2018,14 @@ class MainWindow(QMainWindow):
+         self._overlay = ov
+ 
+     def _on_setup_done(self, key: str, os_name: str):
+-        os.makedirs(CONFIG_DIR, exist_ok=True)
+-        API_FILE.write_text(
+-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
+-            encoding="utf-8",
+-        )
++        # We'll just update the current environment for this session
++        os.environ["GEMINI_API_KEY"] = key
++        os.environ["OS_SYSTEM"]      = os_name
++        
++        # Also update the .env file
++        env_path = BASE_DIR / ".env"
++        env_content = f"GEMINI_API_KEY={key}\nOS_SYSTEM={os_name}\n"
++        env_path.write_text(env_content, encoding="utf-8")
+         self._ready = True
+         if self._overlay:
+             self._overlay.hide()
+@@ -1456,14 +2042,53 @@ class _RootShim:
+         pass
+ 
+ 
+-class JarvisUI:
++class JarvisUI(QObject):
++    _camera_toggle_sig = pyqtSignal(bool)
++    _virtual_control_sig = pyqtSignal(bool)
++    _dock_camera_sig = pyqtSignal()
++    _toggle_ui_sig = pyqtSignal()
++    _notify_sig = pyqtSignal(str, str, int)
++    _timer_sig = pyqtSignal(float, str)
++    _timer_cancel_sig = pyqtSignal()
++
+     def __init__(self, face_path: str, size=None):
++        super().__init__()
+         self._app = QApplication.instance() or QApplication(sys.argv)
+         self._app.setStyle("Fusion")
+         self._win = MainWindow(face_path)
++        self._camera_toggle_sig.connect(self._handle_camera_toggle, Qt.ConnectionType.QueuedConnection)
++        self._virtual_control_sig.connect(self._win.toggle_virtual_control, Qt.ConnectionType.QueuedConnection)
++        self._dock_camera_sig.connect(self._win.camera_preview.dock, Qt.ConnectionType.QueuedConnection)
++        self._toggle_ui_sig.connect(self._win._tray_toggle_visible, Qt.ConnectionType.QueuedConnection)
++        self._notify_sig.connect(self._win.notify, Qt.ConnectionType.QueuedConnection)
++        self._timer_sig.connect(self._win.start_timer_countdown, Qt.ConnectionType.QueuedConnection)
++        self._timer_cancel_sig.connect(self._win.cancel_timer, Qt.ConnectionType.QueuedConnection)
+         self._win.show()
+         self.root = _RootShim(self._app)
+ 
++        # ── Global Shortcut ──────────────────────────────────
++        try:
++            import keyboard
++            keyboard.add_hotkey('ctrl+j', self._on_ctrl_j)
++            keyboard.add_hotkey('ctrl+shift+m', lambda: QTimer.singleShot(0, self._win._toggle_mute))
++            keyboard.add_hotkey('ctrl+shift+f', lambda: QTimer.singleShot(0, self._win._toggle_fullscreen))
++            keyboard.add_hotkey('shift+space', self._on_shift_space)
++            
++            # Disable local shortcuts to prevent double triggering when window is focused
++            self._win.sc_mute.setEnabled(False)
++            self._win.sc_full.setEnabled(False)
++        except ImportError:
++            print("[UI] ⚠️ 'keyboard' module not installed. Global shortcut disabled.")
++
++        # ── Clipboard Monitor ────────────────────────────────
++        try:
++            from core.clipboard_monitor import ClipboardMonitor
++            self._clipboard_monitor = ClipboardMonitor(parent=self._win)
++            self._clipboard_monitor.suggestion.connect(self._on_clipboard_suggestion)
++        except Exception as e:
++            print(f"[UI] ⚠️ Clipboard monitor failed to start: {e}")
++            self._clipboard_monitor = None
++
+     @property
+     def muted(self) -> bool:
+         return self._win._muted
+@@ -1485,6 +2110,22 @@ class JarvisUI:
+     def on_text_command(self, cb):
+         self._win.on_text_command = cb
+ 
++    @property
++    def on_speak(self):
++        return getattr(self, "_on_speak_cb", None)
++
++    @on_speak.setter
++    def on_speak(self, cb):
++        self._on_speak_cb = cb
++
++    def speak(self, text: str):
++        cb = getattr(self, "_on_speak_cb", None)
++        if cb:
++            cb(text)
++        else:
++            print(f"[UI] 💬 {text}")
++            self.write_log(f"JARVIS: {text}")
++
+     def set_state(self, state: str):
+         self._win._state_sig.emit(state)
+ 
+@@ -1501,3 +2142,73 @@ class JarvisUI:
+     def stop_speaking(self):
+         if not self.muted:
+             self.set_state("LISTENING")
++
++    def set_camera_preview(self, active: bool):
++        """Toggles the camera preview widget and captures frames."""
++        self._camera_toggle_sig.emit(active)
++
++    def set_virtual_control(self, active: bool):
++        """Toggles virtual hand control via UI button state."""
++        self._virtual_control_sig.emit(active)
++
++    def dock_camera_preview(self):
++        """Docks the floating camera preview back to the main UI."""
++        self._dock_camera_sig.emit()
++
++    def request_reconnect(self):
++        """Requests a reconnection from the live session (e.g. for voice change)."""
++        if hasattr(self, '_live_instance'):
++            self._live_instance.request_reconnect()
++
++    def _handle_camera_toggle(self, active: bool):
++        if active:
++            self._win.camera_preview.show()
++            self._win.camera_preview.start()
++            self._win.btn_virtual_control.show()
++            self._win.toggle_view_btn.show()
++        else:
++            self._win.camera_preview.stop()
++            self._win.camera_preview.hide()
++            self._win.btn_virtual_control.hide()
++            if self._win._timer_end_time <= 0:
++                self._win.toggle_view_btn.hide()
++            # If large camera was active, switch back to HUD
++            if self._win.center_stack.currentWidget() == self._win.large_camera:
++                self._win.center_stack.setCurrentWidget(self._win.hud)
++
++    def get_camera_frame(self):
++        """Returns the latest frame from the camera preview if active."""
++        if hasattr(self._win, 'camera_preview') and self._win.camera_preview.isVisible():
++            with self._win.camera_preview._frame_lock:
++                return self._win.camera_preview.latest_frame
++        return None
++
++    def notify(self, title: str, message: str, duration: int = 3000):
++        """Send a Windows toast notification via the system tray."""
++        self._notify_sig.emit(title, message, duration)
++
++    def start_timer_countdown(self, duration_sec: float, message: str):
++        self._timer_sig.emit(duration_sec, message)
++
++    def cancel_timer(self):
++        self._timer_cancel_sig.emit()
++
++    def _on_clipboard_suggestion(self, content_type: str, message: str, raw_text: str):
++        """Handle clipboard monitor suggestions."""
++        self.write_log(f"SYS: {message}")
++        # Tray notification for visual feedback without speaking
++        if not self._win.isVisible():
++            self.notify("JARVIS — Clipboard", message, 4000)
++
++    def set_clipboard_monitor(self, enabled: bool):
++        """Enable or disable the clipboard monitor."""
++        if self._clipboard_monitor:
++            self._clipboard_monitor.enabled = enabled
++
++    def _on_ctrl_j(self):
++        self._toggle_ui_sig.emit()
++
++    def _on_shift_space(self):
++        """Force manual interrupt (barge-in)."""
++        if hasattr(self, '_live_instance') and self._live_instance:
++            self._live_instance.force_interrupt()
