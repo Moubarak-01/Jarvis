@@ -75,3 +75,38 @@ def get_os_system() -> str:
 def is_configured() -> bool:
     key = get_gemini_key()
     return bool(key and len(key) > 15)
+
+def get_assistant_name() -> str:
+    """Return the configured assistant name, or 'JARVIS' if not set."""
+    return load_config().get("assistant_name", "JARVIS") or "JARVIS"
+
+def get_user_name() -> str:
+    """Return the configured user name for addressing."""
+    return load_config().get("user_name", "")
+
+def save_assistant_config(assistant_name: str, user_name: str) -> None:
+    """Persist assistant name and user name to config."""
+    ensure_config_dir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["assistant_name"] = assistant_name.strip() or "JARVIS"
+    data["user_name"] = user_name.strip()
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+def get_brief_enabled() -> bool:
+    return load_config().get("morning_brief_enabled", True)
+
+def save_brief_enabled(enabled: bool) -> None:
+    ensure_config_dir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["morning_brief_enabled"] = enabled
+    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

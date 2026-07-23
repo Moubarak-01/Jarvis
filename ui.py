@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 
 import psutil
+import colorsys
+import ctypes
 
 from PyQt6.QtCore import (
     QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
@@ -72,6 +74,130 @@ class C:
     WHITE     = "#d8f8ff"
     DARK      = "#000d14"
     BAR_BG    = "#011520"
+
+
+def _read_full_config() -> dict:
+    """Read api_keys.json config dict. Returns {} on any error."""
+    try:
+        return json.loads(API_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_DEFAULT_W, _DEFAULT_H = 980, 700
+_MIN_W,     _MIN_H     = 820, 580
+_LEFT_W  = 148
+_RIGHT_W = 340
+
+_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+
+class C:
+    BG        = "#00060a"
+    PANEL     = "#010d14"
+    PANEL2    = "#010f18"
+    BORDER    = "#0d3347"
+    BORDER_B  = "#1a5c7a"
+    BORDER_A  = "#0f4060"
+    PRI       = "#00d4ff"
+    PRI_DIM   = "#007a99"
+    PRI_GHO   = "#001f2e"
+    ACC       = "#ff6b00"
+    ACC2      = "#ffcc00"
+    GREEN     = "#00ff88"
+    GREEN_D   = "#00aa55"
+    RED       = "#ff3355"
+    MUTED_C   = "#ff3366"
+    TEXT      = "#8ffcff"
+    TEXT_DIM  = "#3a8a9a"
+    TEXT_MED  = "#5ab8cc"
+    WHITE     = "#d8f8ff"
+    DARK      = "#000d14"
+    BAR_BG    = "#011520"
+
+
+# Ana renge (accent) bağlı anahtarlar — durum renkleri (ACC, GREEN, RED…) sabit kalır
+_HUE_LINKED = (
+    "BG", "PANEL", "PANEL2", "BORDER", "BORDER_B", "BORDER_A",
+    "PRI", "PRI_DIM", "PRI_GHO", "TEXT", "TEXT_DIM", "TEXT_MED",
+    "WHITE", "DARK", "BAR_BG",
+)
+_PALETTE_DEFAULTS: dict[str, str] = {k: getattr(C, k) for k in _HUE_LINKED}
+
+DEFAULT_UI_COLOR = _PALETTE_DEFAULTS["PRI"]
+
+
+def apply_ui_accent(accent_hex: str) -> bool:
+    """
+    Seçilen accent rengine göre tüm turkuaz-ailesi paleti yeniden türetir
+    (hue kaydırma — parlaklık/doygunluk oranları korunur, tasarım bozulmaz).
+    Boyanan öğeler (HUD, dalga formu, metrikler) bir sonraki karede yeni
+    rengi alır; stylesheet tabanlı paneller yeniden kurulduklarında alır.
+    """
+    import colorsys
+
+    accent_hex = (accent_hex or "").strip().lower()
+    if not (accent_hex.startswith("#") and len(accent_hex) == 7):
+        return False
+    try:
+        int(accent_hex[1:], 16)
+    except ValueError:
+        return False
+
+    def _hsv(h: str) -> tuple[float, float, float]:
+        r = int(h[1:3], 16) / 255
+        g = int(h[3:5], 16) / 255
+        b = int(h[5:7], 16) / 255
+        return colorsys.rgb_to_hsv(r, g, b)
+
+    base_h            = _hsv(_PALETTE_DEFAULTS["PRI"])[0]
+    acc_h, acc_s, _av = _hsv(accent_hex)
+    dh   = acc_h - base_h
+    grey = acc_s < 0.08   # griye yakın accent → tüm tema desaturize edilir
+
+    for key, hex0 in _PALETTE_DEFAULTS.items():
+        h, s, v = _hsv(hex0)
+        if grey:
+            s *= 0.15
+        r, g, b = colorsys.hsv_to_rgb((h + dh) % 1.0, s, v)
+        setattr(C, key, "#{:02x}{:02x}{:02x}".format(
+            int(r * 255 + 0.5), int(g * 255 + 0.5), int(b * 255 + 0.5)))
+    return True
+
+
+def current_palette() -> dict[str, str]:
+    """C sınıfındaki accent'e bağlı renklerin anlık kopyası."""
+    return {k: getattr(C, k) for k in _HUE_LINKED}
+
+
+def retheme_all_widgets(old: dict[str, str], new: dict[str, str]) -> None:
+    """
+    CANLI tam tema değişimi. Uygulamadaki HER widget'ın stylesheet'inde eski
+    palet renklerini yenileriyle değiştirir ve yeniden çizdirir. Böylece renk
+    değişimi yalnızca boyanan öğelerde değil, panel/buton/kenarlık dahil tüm
+    arayüzde ANINDA uygulanır — yeniden başlatma gerekmez.
+    """
+    mapping = {old[k].lower(): new[k].lower()
+               for k in old if old[k].lower() != new.get(k, old[k]).lower()}
+    if not mapping:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.allWidgets():
+        try:
+            ss = w.styleSheet()
+            if ss:
+                s2 = ss
+                for o, n in mapping.items():
+                    if o in s2:
+                        s2 = s2.replace(o, n)
+                if s2 != ss:
+                    w.setStyleSheet(s2)
+            w.update()
+        except Exception:
+            pass
+
 
 
 def qcol(h: str, a: int = 255) -> QColor:
@@ -698,6 +824,7 @@ class LargeCameraWidget(QWidget):
 
 class HandTrackingWorker(QThread):
     annotated_frame_ready = pyqtSignal(QImage)
+    tracking_failed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -737,6 +864,12 @@ class HandTrackingWorker(QThread):
                     except Exception as e:
                         print(f"[HandTracking] Error loading module: {e}")
                         self.active = False
+                        self.tracking_failed.emit(str(e))
+                        if frame_to_process is not None:
+                            h, w, ch = frame_to_process.shape
+                            bytes_per_line = ch * w
+                            q_img = QImage(frame_to_process.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                            self.annotated_frame_ready.emit(q_img)
                         continue
                 
                 try:
@@ -744,7 +877,7 @@ class HandTrackingWorker(QThread):
                     if res_frame is not None:
                         h, w, ch = res_frame.shape
                         bytes_per_line = ch * w
-                        q_img = QImage(res_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                        q_img = QImage(res_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
                         self.annotated_frame_ready.emit(q_img)
                 except Exception as e:
                     pass
@@ -1287,12 +1420,611 @@ class FloatingTimerWidget(QWidget):
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
+class HueWheel(QWidget):
+    """
+    Dairesel renk seçici. Kullanıcı tutamacı (küçük beyaz daire) çarkın
+    çevresinde sürükleyerek TÜM renk tonları arasından seçim yapar.
+    Merkezdeki dolu daire seçilen rengin canlı önizlemesidir.
+    """
+
+    hue_picked    = pyqtSignal(str)   # sürükleme sırasında (canlı)
+    hue_committed = pyqtSignal(str)   # tutamaç bırakıldığında
+
+    _RING = 16   # halka kalınlığı (px)
+
+    def __init__(self, initial_hex: str = DEFAULT_UI_COLOR, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(148, 148)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hue  = 0.53
+        self._drag = False
+        self.set_color(initial_hex)
+
+    # ── API ──────────────────────────────────────────────────────────────────
+    def color(self) -> str:
+        return QColor.fromHsvF(self._hue, 1.0, 1.0).name()
+
+    def set_color(self, hex_str: str):
+        c = QColor((hex_str or "").strip())
+        if c.isValid() and c.hsvHueF() >= 0:
+            self._hue = c.hsvHueF()
+            self.update()
+
+    # ── geometri yardımcıları ────────────────────────────────────────────────
+    def _ring_rect(self) -> QRectF:
+        m = self._RING / 2 + 3
+        return QRectF(self.rect()).adjusted(m, m, -m, -m)
+
+    def _hue_from_pos(self, pos: QPointF) -> float:
+        c  = QRectF(self.rect()).center()
+        dx = pos.x() - c.x()
+        dy = c.y() - pos.y()          # ekran y'si aşağı — matematiksel eksene çevir
+        ang = math.atan2(dy, dx)      # [-π, π], saat yönünün tersi
+        return (ang / (2 * math.pi)) % 1.0
+
+    # ── çizim ────────────────────────────────────────────────────────────────
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect   = self._ring_rect()
+        center = rect.center()
+
+        grad = QConicalGradient(center, 0)
+        for i in range(0, 361, 20):
+            grad.setColorAt(i / 360.0, QColor.fromHsvF((i % 360) / 360.0, 1.0, 1.0))
+        p.setPen(QPen(QBrush(grad), self._RING))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(rect)
+
+        # merkez önizleme dairesi
+        preview = QColor.fromHsvF(self._hue, 1.0, 1.0)
+        inner   = rect.adjusted(30, 30, -30, -30)
+        p.setPen(QPen(qcol(C.BORDER_B), 1))
+        p.setBrush(QBrush(preview))
+        p.drawEllipse(inner)
+
+        # sürüklenen tutamaç
+        r   = rect.width() / 2
+        ang = self._hue * 2 * math.pi
+        hx  = center.x() + r * math.cos(ang)
+        hy  = center.y() - r * math.sin(ang)
+        p.setPen(QPen(QColor("#00060a"), 2))
+        p.setBrush(QBrush(QColor("#ffffff")))
+        p.drawEllipse(QPointF(hx, hy), 7.5, 7.5)
+
+    # ── fare ─────────────────────────────────────────────────────────────────
+    def mousePressEvent(self, e):
+        self._drag = True
+        self._hue  = self._hue_from_pos(e.position())
+        self.update()
+        self.hue_picked.emit(self.color())
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            self._hue = self._hue_from_pos(e.position())
+            self.update()
+            self.hue_picked.emit(self.color())
+
+    def mouseReleaseEvent(self, e):
+        if self._drag:
+            self._drag = False
+            self.hue_committed.emit(self.color())
+
+
+class CustomizeOverlay(QWidget):
+    """Floating overlay — change assistant name, user name and UI colour."""
+
+    saved = pyqtSignal(str, str, str)   # assistant_name, user_name, ui_color
+    _OW, _OH = 400, 500
+
+    def __init__(self, assistant_name="JARVIS", user_name="",
+                 ui_color=DEFAULT_UI_COLOR, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            CustomizeOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 18, 24, 18)
+        lay.setSpacing(8)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI, align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt); w.setAlignment(align)
+            w.setFont(QFont("Courier New", fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            return w
+
+        _fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
+               f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
+               f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
+
+        lay.addWidget(_lbl("⚙  CUSTOMISE ASSISTANT", 12, True))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep)
+
+        lay.addWidget(_lbl("ASSISTANT NAME", 8, color=C.TEXT_DIM,
+                            align=Qt.AlignmentFlag.AlignLeft))
+        self._name_input = QLineEdit(assistant_name)
+        self._name_input.setFont(QFont("Courier New", 10))
+        self._name_input.setFixedHeight(32)
+        self._name_input.setStyleSheet(_fs)
+        lay.addWidget(self._name_input)
+
+        lay.addSpacing(4)
+        lay.addWidget(_lbl("YOUR NAME  (leave blank for default sir / efendim)", 8,
+                            color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        self._user_input = QLineEdit(user_name)
+        self._user_input.setPlaceholderText("e.g.  Tony   (leave blank for auto)")
+        self._user_input.setFont(QFont("Courier New", 10))
+        self._user_input.setFixedHeight(32)
+        self._user_input.setStyleSheet(_fs)
+        lay.addWidget(self._user_input)
+
+        # ── UI colour — renk çarkı ───────────────────────────────────────────
+        lay.addSpacing(4)
+        clr_hdr = QHBoxLayout()
+        clr_hdr.addWidget(_lbl("UI COLOUR  —  drag the handle", 8,
+                               color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        clr_hdr.addStretch()
+        df_btn = QPushButton("DEFAULT")
+        df_btn.setFixedSize(64, 20)
+        df_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        df_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        df_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        df_btn.clicked.connect(lambda: self._set_color(DEFAULT_UI_COLOR))
+        clr_hdr.addWidget(df_btn)
+        lay.addLayout(clr_hdr)
+
+        self._initial_color = (ui_color or DEFAULT_UI_COLOR).strip().lower()
+        self._sel_color     = self._initial_color
+        self.on_preview     = None   # callable(hex) — canlı önizleme; MainWindow bağlar
+
+        self._wheel = HueWheel(self._sel_color)
+        wheel_row = QHBoxLayout()
+        wheel_row.addStretch(); wheel_row.addWidget(self._wheel); wheel_row.addStretch()
+        lay.addLayout(wheel_row)
+        self._wheel.hue_picked.connect(self._on_wheel_pick)
+        self._wheel.hue_committed.connect(self._on_wheel_commit)
+
+        self._hex_input = QLineEdit(self._sel_color)
+        self._hex_input.setPlaceholderText("#00d4ff   (custom hex colour)")
+        self._hex_input.setFont(QFont("Courier New", 10))
+        self._hex_input.setFixedHeight(28)
+        self._hex_input.setStyleSheet(_fs)
+        self._hex_input.textEdited.connect(self._on_hex_edited)
+        lay.addWidget(self._hex_input)
+
+        lay.addSpacing(6)
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+
+        save_btn = QPushButton("▸  APPLY CHANGES")
+        save_btn.setFixedHeight(34)
+        save_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        save_btn.clicked.connect(self._save)
+        btn_row.addWidget(save_btn)
+
+        cancel_btn = QPushButton("CANCEL")
+        cancel_btn.setFixedHeight(34)
+        cancel_btn.setFont(QFont("Courier New", 9))
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        cancel_btn.clicked.connect(self._cancel)
+        btn_row.addWidget(cancel_btn)
+        lay.addLayout(btn_row)
+
+    # ── renk akışı ───────────────────────────────────────────────────────────
+    def _set_color(self, hx: str, update_wheel: bool = True, preview: bool = True):
+        """Seçili rengi günceller; hex kutusu + çark senkron kalır, tema canlı önizlenir."""
+        self._sel_color = hx.strip().lower()
+        self._hex_input.blockSignals(True)
+        self._hex_input.setText(self._sel_color)
+        self._hex_input.blockSignals(False)
+        if update_wheel:
+            self._wheel.set_color(self._sel_color)
+        if preview and self.on_preview:
+            self.on_preview(self._sel_color)
+
+    def _on_wheel_pick(self, hx: str):
+        # Sürükleme sırasında: hex kutusunu güncelle, temayı henüz uygulama
+        self._sel_color = hx
+        self._hex_input.blockSignals(True)
+        self._hex_input.setText(hx)
+        self._hex_input.blockSignals(False)
+
+    def _on_wheel_commit(self, hx: str):
+        # Tutamaç bırakıldı → tüm arayüzü canlı önizle
+        self._set_color(hx, update_wheel=False)
+
+    def _on_hex_edited(self, text: str):
+        t = text.strip().lower()
+        if t.startswith("#") and len(t) == 7:
+            try:
+                int(t[1:], 16)
+            except ValueError:
+                return
+            self._set_color(t, update_wheel=True, preview=True)
+
+    def _cancel(self):
+        # Önizleme uygulandıysa açılıştaki renge geri dön
+        if self.on_preview and self._sel_color != self._initial_color:
+            self.on_preview(self._initial_color)
+        self.hide()
+
+    def _save(self):
+        name = self._name_input.text().strip() or "JARVIS"
+        user = self._user_input.text().strip()
+        self.saved.emit(name, user, self._sel_color or DEFAULT_UI_COLOR)
+        self.hide()
+
+
+class ClipboardPanel(QWidget):
+    """Floating panel shown when text is copied — offers quick Jarvis actions."""
+
+    action_requested = pyqtSignal(str)
+    _W, _H = 326, 112
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            ClipboardPanel {{
+                background: rgba(0, 8, 14, 248);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._W)
+        self._clip_text = ""
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 7)
+        lay.setSpacing(4)
+
+        hdr = QHBoxLayout(); hdr.setSpacing(4)
+        icon_lbl = QLabel("◈  CLIPBOARD DETECTED")
+        icon_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        icon_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        hdr.addWidget(icon_lbl); hdr.addStretch()
+        x_btn = QPushButton("✕")
+        x_btn.setFixedSize(16, 16)
+        x_btn.setFont(QFont("Courier New", 8))
+        x_btn.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        x_btn.clicked.connect(self.hide)
+        hdr.addWidget(x_btn)
+        lay.addLayout(hdr)
+
+        self._preview = QLabel()
+        self._preview.setFont(QFont("Courier New", 8))
+        self._preview.setStyleSheet(f"""
+            color: {C.TEXT}; background: {C.PANEL2};
+            border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 6px;
+        """)
+        self._preview.setWordWrap(False)
+        self._preview.setFixedHeight(28)
+        lay.addWidget(self._preview)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(4)
+        _bs = (f"QPushButton {{ background: {C.PANEL2}; color: {C.TEXT_MED}; "
+               f"border: 1px solid {C.BORDER}; border-radius: 2px; }}"
+               f"QPushButton:hover {{ color: {C.PRI}; border-color: {C.BORDER_B}; }}")
+        for label, cmd_fmt in [
+            ("TRANSLATE", "Translate this text to English: {text}"),
+            ("SUMMARISE", "Summarise this: {text}"),
+            ("EXPLAIN",   "Explain this: {text}"),
+            ("FIX",       "Fix grammar and spelling: {text}"),
+        ]:
+            b = QPushButton(label)
+            b.setFixedHeight(22)
+            b.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(_bs)
+            b.clicked.connect(lambda _, c=cmd_fmt: self._trigger(c))
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        self._dismiss_timer = QTimer(self)
+        self._dismiss_timer.setSingleShot(True)
+        self._dismiss_timer.timeout.connect(self.hide)
+        self.hide()
+
+    def _trigger(self, cmd_fmt: str):
+        if self._clip_text:
+            self.action_requested.emit(cmd_fmt.format(text=self._clip_text[:800]))
+        self.hide()
+
+    def show_clipboard(self, text: str):
+        self._clip_text = text
+        preview = text[:58].replace('\n', ' ')
+        if len(text) > 58:
+            preview += "…"
+        self._preview.setText(f'"{preview}"')
+        self.show(); self.raise_()
+        self._dismiss_timer.start(8000)
+
+
+class RemoteKeyOverlay(QWidget):
+    """Floating overlay — QR code for instant phone pairing + manual key fallback."""
+
+    closed = pyqtSignal()
+
+    _OW, _OH = 400, 465
+
+    def __init__(self, url: str, key: str, auto_login_url: str = "",
+                 manual_url: str = "", expiry_secs: int = 600, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            RemoteKeyOverlay {{
+                background: rgba(0, 4, 12, 0.95);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 14px;
+            }}
+        """)
+        self._expiry          = time.time() + expiry_secs
+        self._on_new_key      = None
+        self._auto_login_url  = auto_login_url
+        self._manual_url      = manual_url or url
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 16, 24, 16)
+        lay.setSpacing(5)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(QFont("Courier New", fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        lay.addWidget(_lbl("◈  REMOTE ACCESS", 12, True))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep)
+
+        # ── QR code ───────────────────────────────────────────────────────────
+        self._qr_label = QLabel()
+        self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._qr_label.setFixedSize(176, 176)
+        self._qr_label.setStyleSheet(
+            "background: white; border-radius: 10px; padding: 4px;"
+        )
+        qr_row = QHBoxLayout()
+        qr_row.addStretch()
+        qr_row.addWidget(self._qr_label)
+        qr_row.addStretch()
+        lay.addLayout(qr_row)
+
+        self._update_qr(auto_login_url)
+
+        lay.addWidget(_lbl("Scan with phone camera to connect instantly", 8, color=C.TEXT_DIM))
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep2)
+
+        lay.addWidget(_lbl("Or enter manually:", 7, color=C.TEXT_DIM,
+                           align=Qt.AlignmentFlag.AlignLeft))
+
+        self._url_lbl = QLabel(self._manual_url)
+        self._url_lbl.setFont(QFont("Courier New", 8))
+        self._url_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
+        self._url_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._url_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._url_lbl)
+
+        self._key_lbl = QLabel(key)
+        self._key_lbl.setFont(QFont("Courier New", 28, QFont.Weight.Bold))
+        self._key_lbl.setStyleSheet(f"""
+            color: {C.ACC};
+            background: {C.PANEL2};
+            border: 1px solid {C.BORDER_B};
+            border-radius: 8px;
+            padding: 6px 4px;
+            letter-spacing: 10px;
+        """)
+        self._key_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._key_lbl)
+
+        self._timer_lbl = QLabel()
+        self._timer_lbl.setFont(QFont("Courier New", 8))
+        self._timer_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._timer_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._timer_lbl)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
+        new_btn = QPushButton("NEW KEY")
+        new_btn.setFixedHeight(32)
+        new_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        new_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PANEL}; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 5px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        new_btn.clicked.connect(self._refresh_key)
+        btn_row.addWidget(new_btn)
+
+        close_btn = QPushButton("DISMISS")
+        close_btn.setFixedHeight(32)
+        close_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 5px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+        """)
+        close_btn.clicked.connect(self._do_close)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+        self._ctimer = QTimer(self)
+        self._ctimer.timeout.connect(self._tick)
+        self._ctimer.start(1000)
+        self._tick()
+
+    def set_new_key_callback(self, fn) -> None:
+        self._on_new_key = fn
+
+    def _update_qr(self, url: str) -> None:
+        if not url:
+            self._qr_label.setText("—")
+            return
+        try:
+            import qrcode as _qrmod
+            from io import BytesIO
+            qr = _qrmod.QRCode(
+                box_size=5, border=2,
+                error_correction=_qrmod.constants.ERROR_CORRECT_M,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            px = QPixmap()
+            px.loadFromData(buf.getvalue())
+            self._qr_label.setPixmap(
+                px.scaled(170, 170,
+                          Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+            )
+        except ImportError:
+            self._qr_label.setText("pip install\nqrcode[pil]")
+            self._qr_label.setFont(QFont("Courier New", 8))
+            self._qr_label.setStyleSheet(
+                "color: #888; background: white; border-radius: 10px; padding: 4px;"
+            )
+        except Exception:
+            self._qr_label.setText(url[:28])
+            self._qr_label.setFont(QFont("Courier New", 7))
+            self._qr_label.setStyleSheet(
+                f"color: {C.PRI}; background: white; border-radius: 10px; padding: 4px;"
+            )
+
+    def _tick(self):
+        remaining = max(0, int(self._expiry - time.time()))
+        m, s = divmod(remaining, 60)
+        self._timer_lbl.setText(f"Key expires in  {m:02d}:{s:02d}")
+        if remaining == 0:
+            self._do_close()
+
+    def mark_connected(self) -> None:
+        """Call from any thread when a phone successfully connects."""
+        self._ctimer.stop()
+        self._key_lbl.setText("CONNECTED")
+        self._key_lbl.setStyleSheet(f"""
+            color: {C.GREEN};
+            background: rgba(34,197,94,0.08);
+            border: 2px solid rgba(34,197,94,0.4);
+            border-radius: 8px;
+            padding: 6px 4px;
+            letter-spacing: 4px;
+        """)
+        self._qr_label.setText("✓")
+        self._qr_label.setFont(QFont("Courier New", 54, QFont.Weight.Bold))
+        self._qr_label.setStyleSheet(
+            "color: #00ff88; background: #001a0d; border-radius: 10px;"
+        )
+        self._timer_lbl.setText("Phone connected — JARVIS ready")
+        self._timer_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+
+    def _refresh_key(self):
+        if self._on_new_key:
+            result = self._on_new_key()
+            if result:
+                url    = result[0]
+                key    = result[1]
+                auto   = result[2] if len(result) >= 3 else ""
+                manual = result[3] if len(result) >= 4 else url
+                self._manual_url     = manual or url
+                self._url_lbl.setText(self._manual_url)
+                self._key_lbl.setText(key)
+                self._auto_login_url = auto
+                self._update_qr(auto or url)
+                self._expiry = time.time() + 600
+                self._key_lbl.setStyleSheet(f"""
+                    color: {C.ACC};
+                    background: {C.PANEL2};
+                    border: 1px solid {C.BORDER_B};
+                    border-radius: 8px;
+                    padding: 6px 4px;
+                    letter-spacing: 10px;
+                """)
+                self._timer_lbl.setStyleSheet(
+                    f"color: {C.TEXT_MED}; background: transparent;"
+                )
+                self._ctimer.start(1000)
+                self._tick()
+
+    def _do_close(self):
+        self._ctimer.stop()
+        self.hide()
+        self.closed.emit()
+
+
 class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
 
     def __init__(self, face_path: str):
         super().__init__()
+        _cfg = _read_full_config()
+        self._assistant_name = (_cfg.get("assistant_name") or "JARVIS").strip()
+        _ui_color = (_cfg.get("ui_color") or "").strip()
+        if _ui_color and _ui_color.lower() != DEFAULT_UI_COLOR:
+            try:
+                apply_ui_accent(_ui_color)
+            except Exception: pass
+            
+        self._clipboard_panel = ClipboardPanel(self.centralWidget())
+        self._clipboard_panel.action_requested.connect(getattr(self, '_on_clipboard_action', lambda x: print(x)))
+        QApplication.clipboard().dataChanged.connect(getattr(self, '_on_clipboard_changed', lambda: None))
+        
+        self._customize_overlay = CustomizeOverlay(
+            assistant_name=self._assistant_name,
+            user_name=_cfg.get("user_name", ""),
+            ui_color=_ui_color,
+            parent=self.centralWidget()
+        )
+        self._customize_overlay.saved.connect(getattr(self, '_on_customize_saved', lambda n, u, c: None))
+        self._customize_overlay.on_preview = getattr(self, '_preview_ui_color', None)
+        self._customize_overlay.hide()
+
         self.setWindowTitle("J.A.R.V.I.S — MARK XXXIX")
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
@@ -1359,6 +2091,7 @@ class MainWindow(QMainWindow):
         # Virtual Hand Control
         self.hand_worker = HandTrackingWorker(self)
         self.hand_worker.annotated_frame_ready.connect(self.camera_preview.set_annotated_frame)
+        self.hand_worker.tracking_failed.connect(self._on_tracking_failed)
         self.hand_worker.start()
         self.camera_preview.frame_ready_rgb.connect(self.hand_worker.update_frame)
 
@@ -1367,6 +2100,14 @@ class MainWindow(QMainWindow):
         
         self.floating_timer = FloatingTimerWidget()
         self.floating_timer.hide()
+
+        
+        self._quick_drawer = getattr(self, '_build_quick_drawer', lambda: QWidget())()
+        if hasattr(self, '_update_autostart_btn'):
+            self._update_autostart_btn(getattr(self, '_check_autostart', lambda: False)())
+        from memory.config_manager import get_brief_enabled
+        if hasattr(self, '_update_brief_btn'):
+            self._update_brief_btn(get_brief_enabled())
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -1816,6 +2557,552 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.toggle_view_btn)
 
         return w
+    def _toggle_drawer(self, checked: bool):
+        if checked:
+            self._position_quick_drawer()
+            self._quick_drawer.show()
+            self._quick_drawer.raise_()
+        else:
+            self._quick_drawer.hide()
+
+    
+    def _position_quick_drawer(self):
+        if not hasattr(self, '_quick_drawer'):
+            return
+        _W = 220
+        self._quick_drawer.setFixedWidth(_W)
+        self._quick_drawer.adjustSize()
+        self._quick_drawer.setGeometry(12, 54, _W, self._quick_drawer.sizeHint().height())
+
+    def _build_input_row(self) -> QHBoxLayout:
+        row = QHBoxLayout(); row.setSpacing(5)
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Type a command or question…")
+        self._input.setFont(QFont("Courier New", 9))
+        self._input.setFixedHeight(30)
+        self._input.setStyleSheet(f"""
+            QLineEdit {{
+                background: #000d14; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 7px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        self._input.returnPressed.connect(self._send)
+        row.addWidget(self._input)
+
+        send = QPushButton("▸")
+        send.setFixedSize(30, 30)
+        send.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        send.setCursor(Qt.CursorShape.PointingHandCursor)
+        send.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PANEL}; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        send.clicked.connect(self._send)
+        row.addWidget(send)
+        return row
+
+    def _build_content_panel(self) -> QWidget:
+        """
+        Collapsible panel below the HUD — shows search results, news, briefings.
+        Hidden by default; appears when show_content() is called.
+        """
+        w = QWidget()
+        w.setObjectName("ContentPanel")
+        w.setStyleSheet(f"""
+            QWidget#ContentPanel {{
+                background: {C.PANEL};
+                border-top: 1px solid {C.BORDER_B};
+            }}
+        """)
+        w.hide()
+
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 7, 12, 8)
+        lay.setSpacing(5)
+
+        # ── header row ───────────────────────────────────────────────────────
+        hdr = QHBoxLayout(); hdr.setSpacing(6)
+
+        dot = QLabel("◈")
+        dot.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        dot.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(dot)
+
+        self._content_title_lbl = QLabel("BRIEFING")
+        self._content_title_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._content_title_lbl.setStyleSheet(
+            f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
+        )
+        hdr.addWidget(self._content_title_lbl)
+        hdr.addStretch()
+
+        self._content_ts_lbl = QLabel("")
+        self._content_ts_lbl.setFont(QFont("Courier New", 7))
+        self._content_ts_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        hdr.addWidget(self._content_ts_lbl)
+
+        dismiss = QPushButton("DISMISS  ✕")
+        dismiss.setFont(QFont("Courier New", 7))
+        dismiss.setFixedHeight(18)
+        dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        dismiss.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_DIM};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 0 5px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        dismiss.clicked.connect(w.hide)
+        hdr.addWidget(dismiss)
+        lay.addLayout(hdr)
+
+        # ── separator ─────────────────────────────────────────────────────────
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER};"); lay.addWidget(sep)
+
+        # ── text display ──────────────────────────────────────────────────────
+        self._content_display = QTextEdit()
+        self._content_display.setReadOnly(True)
+        self._content_display.setFont(QFont("Courier New", 8))
+        self._content_display.setMinimumHeight(60)
+        self._content_display.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._content_display.setStyleSheet(f"""
+            QTextEdit {{
+                background: {C.DARK};
+                color: {C.TEXT};
+                border: 1px solid {C.BORDER};
+                border-radius: 3px;
+                padding: 6px 8px;
+                selection-background-color: {C.PRI_GHO};
+            }}
+            QScrollBar:vertical {{
+                background: {C.BG}; width: 6px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C.BORDER_B}; border-radius: 3px; min-height: 16px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; border: none;
+            }}
+        """)
+        lay.addWidget(self._content_display)
+
+        return w
+
+    def _show_content(self, title: str, text: str):
+        """Slot — runs on Qt main thread. Updates and shows the content panel."""
+        import time as _time
+        self._content_title_lbl.setText(title.upper()[:48])
+        self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
+        self._content_display.setPlainText(text)
+        self._content_display.moveCursor(
+            self._content_display.textCursor().MoveOperation.Start
+        )
+        first_show = not self._content_panel.isVisible()
+        self._content_panel.show()
+        if first_show:
+            total = self._center_split.height()
+            self._center_split.setSizes([max(total - 220, 120), 220])
+
+    def _on_tracking_failed(self, msg: str):
+        self.camera_preview.is_tracking = False
+        self.hand_worker.set_active(False)
+        self.write_log(f"SYS: Virtual control disabled - {msg}")
+
+    def _build_footer(self) -> QWidget:
+        w = QWidget()
+        w.setFixedHeight(22)
+        w.setStyleSheet(f"background: {C.DARK}; border-top: 1px solid {C.BORDER};")
+        lay = QHBoxLayout(w); lay.setContentsMargins(14, 0, 14, 0)
+
+        def _fl(txt, color=C.TEXT_MED):
+            l = QLabel(txt); l.setFont(QFont("Courier New", 7))
+            l.setStyleSheet(f"color: {color}; background: transparent;")
+            return l
+
+        lay.addWidget(_fl("[Ctrl+Shift+M] Mute  ·  [Ctrl+Shift+F] Fullscreen"))
+        lay.addStretch()
+        lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
+        return w
+
+    
+    def _on_clipboard_changed(self):
+        try:
+            text = QApplication.clipboard().text().strip()
+            if len(text) >= 10:
+                self._clipboard_sig.emit(text)
+        except Exception:
+            pass
+
+    def _show_clipboard_panel(self, text: str):
+        self._clipboard_panel.show_clipboard(text)
+        self._position_clipboard_panel()
+
+    def _position_clipboard_panel(self):
+        cw = self.centralWidget()
+        pw = ClipboardPanel._W
+        ph = self._clipboard_panel.sizeHint().height() or ClipboardPanel._H
+        x = (cw.width() - pw) // 2
+        y = cw.height() - ph - 6
+        self._clipboard_panel.setGeometry(x, y, pw, ph)
+        self._clipboard_panel.raise_()
+
+    
+    def _on_clipboard_action(self, cmd: str):
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(cmd,), daemon=True).start()
+
+    # ────────────────────────────────────────────────────────────────────────────
+
+    def _do_interrupt(self):
+        if self.on_interrupt:
+            self.on_interrupt()
+
+    
+    def _show_clipboard_panel(self, text: str):
+        self._clipboard_panel.show_clipboard(text)
+        self._position_clipboard_panel()
+
+    def _position_clipboard_panel(self):
+        cw = self.centralWidget()
+        pw = ClipboardPanel._W
+        ph = self._clipboard_panel.sizeHint().height() or ClipboardPanel._H
+        x = (cw.width() - pw) // 2
+        y = cw.height() - ph - 6
+        self._clipboard_panel.setGeometry(x, y, pw, ph)
+        self._clipboard_panel.raise_()
+
+    def _on_clipboard_action(self, cmd: str):
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(cmd,), daemon=True).start()
+
+    # ────────────────────────────────────────────────────────────────────────────
+
+    def _do_interrupt(self):
+        if self.on_interrupt:
+            self.on_interrupt()
+
+    def _toggle_mute(self):
+        self._muted = not self._muted
+        self.hud.muted = self._muted
+        self._style_mute_btn()
+        if self._muted:
+            self._apply_state("MUTED")
+            self._log.append_log("SYS: Microphone muted.")
+        else:
+            self._apply_state("LISTENING")
+            self._log.append_log("SYS: Microphone active.")
+
+    def _style_mute_btn(self):
+        if self._muted:
+            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #140006; color: {C.MUTED_C};
+                    border: 1px solid {C.MUTED_C}; border-radius: 3px;
+                }}
+            """)
+        else:
+            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
+            self._mute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #00140a; color: {C.GREEN};
+                    border: 1px solid {C.GREEN}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ background: #001f10; }}
+            """)
+
+    def _send(self):
+        txt = self._input.text().strip()
+        if not txt: return
+        self._input.clear()
+        self._log.append_log(f"You: {txt}")
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+
+    
+    def _check_autostart(self) -> bool:
+        """Returns True if auto-start is currently registered on this OS."""
+        try:
+            if _OS == "Windows":
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+                try:
+                    winreg.QueryValueEx(key, "JARVIS_AI")
+                    return True
+                except FileNotFoundError:
+                    return False
+                finally:
+                    winreg.CloseKey(key)
+            elif _OS == "Darwin":
+                return (Path.home() / "Library" / "LaunchAgents"
+                        / "com.jarvis.assistant.plist").exists()
+            else:
+                return (Path.home() / ".config" / "autostart" / "jarvis.desktop").exists()
+        except Exception:
+            return False
+
+    
+    def _toggle_autostart(self):
+        currently_on = self._check_autostart()
+        try:
+            script = str(Path(__file__).resolve().parent / "main.py")
+            if _OS == "Windows":
+                import winreg
+                reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
+                if currently_on:
+                    winreg.DeleteValue(reg, "JARVIS_AI")
+                else:
+                    pythonw = Path(sys.executable).parent / "pythonw.exe"
+                    exe = str(pythonw if pythonw.exists() else sys.executable)
+                    winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
+                                      f'"{exe}" "{script}"')
+                winreg.CloseKey(reg)
+            elif _OS == "Darwin":
+                plist_dir = Path.home() / "Library" / "LaunchAgents"
+                plist_dir.mkdir(parents=True, exist_ok=True)
+                plist = plist_dir / "com.jarvis.assistant.plist"
+                if currently_on:
+                    plist.unlink(missing_ok=True)
+                else:
+                    plist.write_text(
+                        '<?xml version="1.0" encoding="UTF-8"?>\n'
+                        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                        '<plist version="1.0"><dict>\n'
+                        '  <key>Label</key><string>com.jarvis.assistant</string>\n'
+                        '  <key>ProgramArguments</key><array>\n'
+                        f'    <string>{sys.executable}</string>\n'
+                        f'    <string>{script}</string>\n'
+                        '  </array>\n'
+                        '  <key>RunAtLoad</key><true/>\n'
+                        '</dict></plist>\n'
+                    )
+            else:
+                desk_dir = Path.home() / ".config" / "autostart"
+                desk_dir.mkdir(parents=True, exist_ok=True)
+                desk = desk_dir / "jarvis.desktop"
+                if currently_on:
+                    desk.unlink(missing_ok=True)
+                else:
+                    desk.write_text(
+                        "[Desktop Entry]\n"
+                        f"Name={self._assistant_name}\n"
+                        f"Exec={sys.executable} {script}\n"
+                        "Type=Application\nTerminal=false\n"
+                        "X-GNOME-Autostart-enabled=true\n"
+                    )
+            enabled = not currently_on
+            self._update_autostart_btn(enabled)
+            self._log.append_log(
+                f"SYS: Auto-start {'enabled' if enabled else 'disabled'}.")
+        except Exception as e:
+            self._log.append_log(f"ERR: Auto-start failed — {e}")
+
+    
+    def _update_autostart_btn(self, enabled: bool):
+        if not hasattr(self, '_autostart_btn'):
+            return
+        if enabled:
+            self._autostart_btn.setText("◉  AUTO-START: ON")
+            self._autostart_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._autostart_btn.setText("◉  AUTO-START: OFF")
+            self._autostart_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    
+    def _toggle_brief(self):
+        from memory.config_manager import get_brief_enabled, save_brief_enabled
+        new_val = not get_brief_enabled()
+        save_brief_enabled(new_val)
+        self._update_brief_btn(new_val)
+
+    
+    def _update_brief_btn(self, enabled: bool):
+        if not hasattr(self, '_brief_btn'):
+            return
+        if enabled:
+            self._brief_btn.setText("☀  MORNING BRIEF: ON")
+            self._brief_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._brief_btn.setText("☀  MORNING BRIEF: OFF")
+            self._brief_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    # ── Customization ────────────────────────────────────────────────────────────
+
+    def _open_customize(self):
+        cfg = _read_full_config()
+        if self._customize_overlay:
+            self._customize_overlay.hide()
+        cw = self.centralWidget()
+        ov = CustomizeOverlay(
+            cfg.get("assistant_name", "JARVIS") or "JARVIS",
+            cfg.get("user_name", ""),
+            cfg.get("ui_color", "") or DEFAULT_UI_COLOR,
+            parent=cw,
+        )
+        ow, oh = CustomizeOverlay._OW, CustomizeOverlay._OH
+        oh = min(oh, cw.height() - 16)
+        ov.setGeometry(
+            (cw.width()  - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+        ov.on_preview = self._preview_ui_color
+        ov.saved.connect(self._apply_name_update)
+        ov.show()
+        self._customize_overlay = ov
+
+    def _preview_ui_color(self, hex_color: str):
+        """Canlı önizleme — tüm arayüzü yeni renge boyar (config'e YAZMAZ)."""
+        old = current_palette()
+        if apply_ui_accent(hex_color):
+            retheme_all_widgets(old, current_palette())
+
+    def _apply_name_update(self, name: str, user_name: str, ui_color: str = ""):
+        """Update all name/theme-dependent UI elements and persist to config."""
+        self._assistant_name = name.strip() or "JARVIS"
+        display = self._assistant_name.upper()
+        self.setWindowTitle(f"{display} — MARK XLIX")
+        self._title_lbl.setText(display)
+        if display in ("JARVIS", "J.A.R.V.I.S"):
+            self._sub_lbl.setText("Just A Rather Very Intelligent System")
+        else:
+            self._sub_lbl.setText("Personal AI Assistant")
+        self._log._ai_name_lc = self._assistant_name.lower()
+        self.hud._assistant_name = display
+
+        color_changed = False
+        if ui_color:
+            old = current_palette()
+            if apply_ui_accent(ui_color):
+                # Tüm arayüzü (paneller, butonlar, kenarlıklar, HUD) canlı boya
+                retheme_all_widgets(old, current_palette())
+                color_changed = old["PRI"] != C.PRI
+
+        try:
+            data = _read_full_config()
+            data["assistant_name"] = self._assistant_name
+            data["user_name"] = user_name.strip()
+            if ui_color:
+                data["ui_color"] = ui_color.strip().lower()
+            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+            self._log.append_log(f"SYS: Identity updated — {display}")
+            if color_changed:
+                self._log.append_log(f"SYS: UI colour applied — {ui_color}")
+        except Exception as e:
+            self._log.append_log(f"ERR: Config save failed — {e}")
+
+    # ── Clipboard intelligence ───────────────────────────────────────────────────
+
+    def _on_clipboard_changed(self):
+        try:
+            text = QApplication.clipboard().text().strip()
+            if len(text) >= 10:
+                self._clipboard_sig.emit(text)
+        except Exception:
+            pass
+
+    def _show_clipboard_panel(self, text: str):
+        self._clipboard_panel.show_clipboard(text)
+        self._position_clipboard_panel()
+
+    def _position_clipboard_panel(self):
+        cw = self.centralWidget()
+        pw = ClipboardPanel._W
+        ph = self._clipboard_panel.sizeHint().height() or ClipboardPanel._H
+        x = (cw.width() - pw) // 2
+        y = cw.height() - ph - 6
+        self._clipboard_panel.setGeometry(x, y, pw, ph)
+        self._clipboard_panel.raise_()
+
+    def _on_clipboard_action(self, cmd: str):
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(cmd,), daemon=True).start()
+
+    # ────────────────────────────────────────────────────────────────────────────
+
+    def _do_interrupt(self):
+        if self.on_interrupt:
+            self.on_interrupt()
+
+    def _toggle_mute(self):
+        self._muted = not self._muted
+        self.hud.muted = self._muted
+        self._style_mute_btn()
+        if self._muted:
+            self._apply_state("MUTED")
+            self._log.append_log("SYS: Microphone muted.")
+        else:
+            self._apply_state("LISTENING")
+            self._log.append_log("SYS: Microphone active.")
+
+    def _style_mute_btn(self):
+        if self._muted:
+            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #140006; color: {C.MUTED_C};
+                    border: 1px solid {C.MUTED_C}; border-radius: 3px;
+                }}
+            """)
+        else:
+            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
+            self._mute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #00140a; color: {C.GREEN};
+                    border: 1px solid {C.GREEN}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ background: #001f10; }}
+            """)
+
+    def _send(self):
+        txt = self._input.text().strip()
+        if not txt: return
+        self._input.clear()
+        self._log.append_log(f"You: {txt}")
+        if self.on_text_command:
+            threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+
+    def _apply_state(self, state: str):
+        self.hud.state    = state
+        self.hud.speaking = (state == "SPEAKING")
+
+    
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)

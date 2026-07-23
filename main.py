@@ -1,3 +1,19 @@
+import platform as _platform
+import subprocess as _subprocess
+
+# ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
+if _platform.system() == "Windows":
+    _OrigPopen = _subprocess.Popen
+
+    class _Popen(_OrigPopen):
+        def __init__(self, args, **kw):
+            kw["creationflags"] = kw.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
+            kw.pop("startupinfo", None)
+            super().__init__(args, **kw)
+
+    _subprocess.Popen = _Popen
+# ─────────────────────────────────────────────────────────────────────────────
+
 import asyncio
 import re
 import threading
@@ -7,6 +23,11 @@ import os
 import traceback
 import time
 from pathlib import Path
+from actions.system_monitor    import SystemMonitor
+from actions.proactive         import ProactiveEngine
+from actions.web_search        import web_search
+from memory.config_manager     import get_brief_enabled
+
 
 # --- FIX: Resolve Qt DPI Awareness conflict and suppress warnings ---
 if sys.platform == "win32":
@@ -720,6 +741,15 @@ class JarvisLive:
         self.session_history    = []
         self._last_jarvis_speak = 0.0
         self._ignore_audio_until= 0.0
+        self.ui.on_remote_clicked = getattr(self, '_make_remote_key', None)
+        self.ui.on_interrupt      = getattr(self, 'interrupt', None)
+        self._dashboard     = None
+        self._phone_active  = False
+        self._interrupted   = False
+        self._briefing_sent = False
+        self._sys_monitor   = SystemMonitor()
+        self._proactive     = ProactiveEngine()
+
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -843,6 +873,95 @@ class JarvisLive:
                     ),
                     self._loop
                 )
+
+    
+    def _make_remote_key(self):
+        if self._dashboard is None:
+            self.ui.write_log("SYS: Dashboard unavailable. Run: pip install fastapi uvicorn cryptography")
+            return None
+        key    = self._dashboard.new_key()
+        url    = self._dashboard.get_url()
+        manual = self._dashboard.get_manual_url()
+        return url, key, f"{url}/auto-login?key={key}", manual
+
+    def interrupt(self):
+        self._interrupted = True
+        q = self.audio_in_queue
+        if q:
+            while True:
+                try:
+                    q.get_nowait()
+                except Exception:
+                    break
+        self.set_speaking(False)
+        if getattr(self, '_turn_done_event', None):
+            self._turn_done_event.clear()
+        self.ui.write_log("SYS: Interrupted - listening...")
+
+    async def _send_startup_briefing(self) -> None:
+        pass 
+        
+    async def _run_system_monitor(self) -> None:
+        import asyncio
+        while True:
+            await asyncio.sleep(10)
+            alert = await asyncio.to_thread(self._sys_monitor.check)
+            if alert and self.session:
+                try:
+                    await self.session.send_client_content(turns={"parts": [{"text": alert}]}, turn_complete=True)
+                except Exception:
+                    pass
+
+    async def _run_proactive_mode(self) -> None:
+        import asyncio
+        from memory.memory_manager import load_memory
+        while True:
+            await asyncio.sleep(60)
+            if not self.session or self._is_speaking: continue
+            if not self._proactive.should_trigger(self._last_user_speech): continue
+            self._proactive.mark_triggered()
+            try:
+                memory = await asyncio.to_thread(load_memory)
+                prompt = self._proactive.build_prompt(memory)
+                await self.session.send_client_content(turns={"parts": [{"text": prompt}]}, turn_complete=True)
+                self.ui.write_log("SYS: Proactive check-in.")
+            except Exception:
+                pass
+
+    async def _relay_phone_audio(self) -> None:
+        import asyncio
+        if not hasattr(self._dashboard, '_phone_audio_queue'): return
+        q = self._dashboard._phone_audio_queue
+        while True:
+            try:
+                chunk = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                self._phone_active = False
+                continue
+            self._phone_active = True
+            if not self._is_speaking and not self.ui.muted:
+                try:
+                    self.out_queue.put_nowait({"data": chunk, "mime_type": "audio/pcm;rate=16000"})
+                except asyncio.QueueFull:
+                    pass
+
+    def _on_phone_connected(self) -> None:
+        self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
+        if hasattr(self.ui, 'notify_phone_connected'):
+            self.ui.notify_phone_connected()
+
+    async def _process_dashboard_commands(self) -> None:
+        import asyncio
+        if not hasattr(self._dashboard, '_command_queue'): return
+        while True:
+            try:
+                text = await asyncio.wait_for(self._dashboard._command_queue.get(), timeout=0.5)
+                if not text: continue
+                if self.session:
+                    await self.session.send_client_content(turns={"parts": [{"text": text}]}, turn_complete=True)
+                    self.ui.write_log(f"[Web]: {text}")
+            except Exception:
+                await asyncio.sleep(0.5)
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -1266,6 +1385,12 @@ class JarvisLive:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt:
                                 out_buf.append(txt)
+                        elif sc.model_turn and sc.model_turn.parts:
+                            for part in sc.model_turn.parts:
+                                if part.text:
+                                    txt = _clean_transcript(part.text)
+                                    if txt:
+                                        out_buf.append(txt)
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
@@ -1309,7 +1434,7 @@ class JarvisLive:
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",
-            blocksize=CHUNK_SIZE,
+            # blocksize=CHUNK_SIZE, # Removed so we can accept chunks of any size from Gemini
         )
         stream.start()
 
@@ -1372,6 +1497,19 @@ class JarvisLive:
                 ):
                     self.session        = session
                     self._loop          = asyncio.get_event_loop()
+
+                    if not getattr(self, '_dashboard_started', False):
+                        self._dashboard_started = True
+                        try:
+                            from dashboard.server import DashboardServer
+                            self._dashboard = DashboardServer()
+                            self._dashboard.set_connect_callback(self._on_phone_connected)
+                            asyncio.create_task(self._dashboard.serve())
+                            asyncio.create_task(self._process_dashboard_commands())
+                        except Exception as e:
+                            print(f"[Dashboard] Disabled: {e}")
+                            self._dashboard = None
+
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
@@ -1389,6 +1527,12 @@ class JarvisLive:
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
+
+                    tg.create_task(self._run_system_monitor())
+                    tg.create_task(self._run_proactive_mode())
+                    if self._dashboard:
+                        tg.create_task(self._relay_phone_audio())
+
 
                     while not self._reconnect_requested:
                         await asyncio.sleep(0.5)

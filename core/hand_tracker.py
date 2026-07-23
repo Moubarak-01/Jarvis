@@ -4,14 +4,21 @@ import pyautogui
 
 class HandTracker:
     def __init__(self, smoothing=0.4, pinch_threshold=0.04):
-        self.mp_hands = mp.solutions.hands
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+        import os
+        model_path = os.path.join(os.path.dirname(__file__), 'hand_landmarker.task')
+        
+        base_options = python.BaseOptions(model_asset_path=model_path)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            num_hands=1,
+            min_hand_detection_confidence=0.7,
+            min_hand_presence_confidence=0.7,
+            min_tracking_confidence=0.7,
         )
+        self.landmarker = vision.HandLandmarker.create_from_options(options)
+        
         self.screen_w, self.screen_h = pyautogui.size()
         
         # Smoothing settings
@@ -38,16 +45,21 @@ class HandTracker:
         Process an RGB frame to find hand landmarks and control the mouse.
         Draws landmarks on rgb_frame in place and returns it.
         """
-        results = self.hands.process(rgb_frame)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        results = self.landmarker.detect(mp_image)
         
-        if results.multi_hand_landmarks:
+        if results.hand_landmarks:
             # We only care about the first hand detected
-            hand_landmarks = results.multi_hand_landmarks[0]
+            hand_landmarks = results.hand_landmarks[0]
             
-            # Draw landmarks
-            self.mp_drawing.draw_landmarks(rgb_frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+            # Draw landmarks manually since drawing_utils is missing
+            import cv2
+            h, w, ch = rgb_frame.shape
+            for landmark in hand_landmarks:
+                cx, cy = int(landmark.x * w), int(landmark.y * h)
+                cv2.circle(rgb_frame, (cx, cy), 5, (0, 255, 0), -1)
             
-            lm = hand_landmarks.landmark
+            lm = hand_landmarks
             
             # Check finger extension (True if extended)
             # Tips: 4, 8, 12, 16, 20
@@ -185,4 +197,4 @@ class HandTracker:
         return rgb_frame
 
     def close(self):
-        self.hands.close()
+        self.landmarker.close()

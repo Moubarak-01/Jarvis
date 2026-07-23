@@ -26,3 +26,9 @@ onnxruntime
 edge-tts
 pygame-ce
 keyboard
+fastapi
+uvicorn[standard]
+cryptography
+python-multipart
+mediapipe
+wmi
