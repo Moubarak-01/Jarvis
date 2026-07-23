@@ -687,6 +687,14 @@ TOOL_DECLARATIONS = [
             }
         }
     },
+    {
+        "name": "get_current_time",
+        "description": "Retrieves the exact current local time, date, and day of the week.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
+        }
+    },
 ]
 
 class JarvisLive:
@@ -847,8 +855,9 @@ class JarvisLive:
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
         time_ctx = (
             f"[CURRENT DATE & TIME]\n"
-            f"Right now it is: {time_str}\n"
-            f"Use this to calculate exact times for reminders.\n\n"
+            f"The session started at: {time_str} Local Time.\n"
+            f"CRITICAL: You do not have an internal real-time clock. The time above is STALE. "
+            f"To answer questions about the exact current time, date, or day, you MUST call the 'get_current_time' tool.\n\n"
         )
 
         parts = [time_ctx]
@@ -1060,6 +1069,14 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: system_status(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "get_current_time":
+                from datetime import datetime
+                import time
+                now = datetime.now()
+                is_dst = time.localtime().tm_isdst > 0
+                tz = time.tzname[1] if is_dst else time.tzname[0]
+                result = f"Current Local Time: {now.strftime('%I:%M:%S %p')}\nCurrent Date: {now.strftime('%A, %B %d, %Y')}\nTimezone: {tz}"
+
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 addr_pref = load_memory().get("preferences", {}).get("address_preference", {}).get("value", "sir")
@@ -1076,10 +1093,17 @@ class JarvisLive:
                 addr_pref = load_memory().get("preferences", {}).get("address_preference", {}).get("value", "sir")
                 self.speak(f"Restarting now, {addr_pref}.")
                 def _restart():
-                    import time, os, sys
+                    import time, os, sys, ctypes
                     time.sleep(1.5)
-                    # Restart the process
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    try:
+                        import __main__
+                        ctypes.windll.kernel32.ReleaseMutex(__main__._mutex)
+                        ctypes.windll.kernel32.CloseHandle(__main__._mutex)
+                    except Exception:
+                        pass
+                    # Quote arguments to handle spaces in paths (like the user directory)
+                    args = [f'"{a}"' if ' ' in a else a for a in [sys.executable] + sys.argv]
+                    os.execv(sys.executable, args)
                 threading.Thread(target=_restart, daemon=True).start()
 
             else:

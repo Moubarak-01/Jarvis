@@ -33,7 +33,7 @@ class ReadingEngine:
         dialogue_count = 0
         
         # Match Speaker Name (Action): Text
-        pattern = re.compile(r'^(?:\*\*|\*|_)?([A-Za-z0-9\s-]{2,15}?)(?:\*\*|\*|_)?\s*(?:\((.*?)\))?\s*(?:\*\*|\*|_)?:\s*(?:\*\*|\*|_)?(.*)', re.DOTALL)
+        pattern = re.compile(r'^(?:\*\*|\*|_)?([A-Za-z0-9\s-.\']{2,25}?)(?:\*\*|\*|_)?\s*(?:\((.*?)\))?\s*(?:\*\*|\*|_)?:\s*(?:\*\*|\*|_)?(.*)', re.DOTALL)
         
         for p in paragraphs:
             match = pattern.match(p)
@@ -121,7 +121,14 @@ class ReadingEngine:
                         config_dict,
                         True   # prefer_fast
                     )
-                    segments = json.loads(response.text)
+                    clean_json = response.text.strip()
+                    if clean_json.startswith("```json"):
+                        clean_json = clean_json[7:]
+                    elif clean_json.startswith("```"):
+                        clean_json = clean_json[3:]
+                    if clean_json.endswith("```"):
+                        clean_json = clean_json[:-3]
+                    segments = json.loads(clean_json.strip())
                 except Exception as e:
                     print(f"[ReadingEngine] API Analysis failed, defaulting to normal reading: {e}")
                     segments = [{"type": "normal", "text": text}]
